@@ -67,6 +67,12 @@ body{
   -webkit-tap-highlight-color:transparent;
   overscroll-behavior-y:none;
 }
+/* The hidden attribute has to beat component rules that set their own display.
+   .modal and .lightbox both declare display:grid, and an author rule outranks
+   the browser's own [hidden]{display:none} — without !important here the search
+   dialog, the edit sheet and the file lightbox all sit open over the app on
+   load, which reads as a blank screen that swallows every click. */
+[hidden]{display:none!important}
 button,input,select,textarea{font:inherit;color:inherit}
 button{background:none;border:0;padding:0;cursor:pointer;color:inherit}
 a{color:var(--iris);text-underline-offset:3px}
@@ -333,6 +339,9 @@ button.chip[aria-pressed="true"]{background:var(--iris-soft);border-color:var(--
 .home-line{color:var(--ink2);font-size:15px;max-width:52ch}
 .home-line b{color:var(--ink);font-weight:600}
 .home-cta{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}
+/* Each button keeps its natural width so the row wraps on a narrow screen
+   instead of crushing the first button and spilling its label off the edge. */
+.home-cta>.btn{flex:0 0 auto}
 
 /* next-up dial */
 .dial{background:linear-gradient(180deg,var(--pane),#0E0E10);border:1px solid var(--rule);border-radius:var(--r-lg);padding:18px;display:grid;grid-template-columns:76px 1fr;gap:15px;align-items:center;position:relative;overflow:hidden}
@@ -725,9 +734,13 @@ button.stat:hover{background:var(--raise)}
   .subject-pick select{max-width:none;flex:1}
   .topbar{flex-wrap:wrap}
   .topbar-right{gap:6px}
-  .btn-accent .t{display:none}
-  .btn-accent{width:36px;height:36px;padding:0;justify-content:center;border-radius:10px}
-  .btn-accent .ic{width:19px;height:19px}
+  /* Only the top bar's primary button collapses to an icon square on a phone.
+     Unscoped, this also hit "Start a note" on Home and every "Save changes" /
+     "Add task" button in the sheets, squashing them to 36px with the label
+     spilling out of the button. */
+  .topbar-right .btn-accent .t{display:none}
+  .topbar-right .btn-accent{width:36px;height:36px;padding:0;justify-content:center;border-radius:10px}
+  .topbar-right .btn-accent .ic{width:19px;height:19px}
 
   main.view{padding:16px var(--pad) calc(30px + var(--tabbar-h))}
 
