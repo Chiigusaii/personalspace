@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0B0B0C">
-<meta name="description" content="Studyframe — notes, timetable, tasks, files and certificates in one place.">
+<meta name="description" content="Studyframe — notes, timetable, tasks, files and certificates in one place. Runs entirely in your browser.">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%230B0B0C'/%3E%3Crect x='22' y='22' width='12' height='56' rx='6' fill='%23E9B94A'/%3E%3Crect x='42' y='22' width='12' height='36' rx='6' fill='%23F4F3F1'/%3E%3Crect x='62' y='22' width='12' height='24' rx='6' fill='%236C6C71'/%3E%3C/svg%3E">
@@ -14,81 +14,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap">
 <link rel="stylesheet" href="styles.css">
-<!-- Firebase SDK -->
-<script type="module">
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, set, onValue, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
-  import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-
-  // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────────────
-  // 1. Go to https://console.firebase.google.com
-  // 2. Create a project → Add a web app
-  // 3. Copy the firebaseConfig object below
-  // 4. In Firebase console: Build → Realtime Database → Create database (test mode)
-  // 5. Build → Authentication → Sign-in method → Anonymous → Enable
-  const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-    projectId: "YOUR_PROJECT",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
-  };
-  // ─────────────────────────────────────────────────────────────────────────
-
-  let fbReady = false;
-  let fbDb = null;
-  let fbUid = null;
-
-  // Check if config is filled in
-  const configured = firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY";
-
-  if (configured) {
-    const app = initializeApp(firebaseConfig);
-    fbDb = getDatabase(app);
-    const auth = getAuth(app);
-
-    // We use a shared device-linked ID stored in localStorage so same person
-    // across tabs stays in sync. If you want per-account sync, replace with
-    // real auth (Google sign-in etc.)
-    let deviceId = localStorage.getItem('sf_device_id');
-    if (!deviceId) {
-      deviceId = 'sf_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-      localStorage.setItem('sf_device_id', deviceId);
-    }
-
-    signInAnonymously(auth).catch(e => console.warn('Firebase auth failed:', e));
-
-    onAuthStateChanged(auth, user => {
-      if (!user) return;
-      fbUid = deviceId; // use device ID as the sync key
-
-      const dataRef = ref(fbDb, 'users/' + fbUid + '/state');
-
-      // Listen for remote changes
-      onValue(dataRef, snapshot => {
-        const remote = snapshot.val();
-        if (!remote) return;
-        // Let app.js handle the merge
-        if (window.__sfOnRemote) window.__sfOnRemote(remote);
-      });
-
-      // Expose helpers to app.js
-      window.__sfFirebase = {
-        save: (data) => {
-          set(ref(fbDb, 'users/' + fbUid + '/state'), data)
-            .catch(e => console.warn('Firebase save failed:', e));
-        },
-        ready: true
-      };
-      fbReady = true;
-    });
-  } else {
-    console.info('Studyframe: Firebase not configured — running in local-only mode.');
-    window.__sfFirebase = { save: () => {}, ready: false };
-  }
-</script>
 </head>
 <body data-view="home">
 <a class="skip" href="#main">Skip to content</a>
@@ -141,20 +66,19 @@
   <g id="i-doc"><path d="M13.4 3.4H6.7a1.6 1.6 0 0 0-1.6 1.6v14a1.6 1.6 0 0 0 1.6 1.6h10.6a1.6 1.6 0 0 0 1.6-1.6V8.6Z"/><path d="M13.4 3.4v5.2h5.5M8.3 13h7.4M8.3 16.4h5"/></g>
   <g id="i-warn"><path d="M12 4.2 20.8 19.6H3.2Z"/><path d="M12 10.2v4.2"/><circle cx="12" cy="17" r="1"/></g>
   <g id="i-layers"><path d="m12 3.6 8.4 4.4L12 12.4 3.6 8Z"/><path d="m3.6 12.4 8.4 4.4 8.4-4.4"/><path d="m3.6 16.8 8.4 4.4 8.4-4.4"/></g>
-  <g id="i-book"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></g>
-  <g id="i-folder"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></g>
-  <g id="i-folder-open"><path d="M3 9a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="m3 13 3-4h14l-3 8H3Z"/></g>
-  <g id="i-cloud"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></g>
 </defs></svg>
 
 <div class="app" id="app">
-  <!-- desktop rail -->
+
+  <!-- ============================ desktop rail ============================ -->
   <nav class="rail" id="rail" aria-label="Sections">
     <button class="rail-logo" data-act="view" data-view="home" title="Studyframe">
       <span class="logo-bars" aria-hidden="true"><i></i><i></i><i></i></span>
       <span class="lbl">Studyframe</span>
     </button>
+
     <ul class="rail-list" id="railList"></ul>
+
     <div class="rail-foot">
       <button class="rail-btn" data-act="palette" title="Search">
         <svg class="ic" viewBox="0 0 24 24"><use href="#i-search"></use></svg><span class="lbl">Search</span>
@@ -169,20 +93,23 @@
   </nav>
 
   <div class="stage">
+    <!-- ============================ top bar ============================ -->
     <header class="topbar">
       <button class="mob-brand" data-act="view" data-view="home">
         <span class="logo-bars" aria-hidden="true"><i></i><i></i><i></i></span>
       </button>
+
       <div class="crumb" id="crumb"></div>
+
       <div class="subject-pick">
         <label class="vh" for="subjectSel">Active subject</label>
         <span class="sdot" id="subjectDot" aria-hidden="true"></span>
         <select id="subjectSel" data-act="subject"></select>
         <svg class="ic chev" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-down"></use></svg>
       </div>
+
       <div class="topbar-right">
         <span class="clock" id="clock"></span>
-        <span class="sync-dot" id="syncDot" title="Sync status"></span>
         <span class="saved" id="saved" role="status" aria-live="polite"></span>
         <button class="btn btn-ghost desk-only" data-act="palette">
           <svg class="ic" viewBox="0 0 24 24"><use href="#i-search"></use></svg>Search<kbd>⌘K</kbd>
@@ -193,20 +120,23 @@
       </div>
     </header>
 
-    <main id="main" class="view" tabindex="-1">
+    <main id="main" class="view" tabindex="-1"><!-- replaced by the first render; visible only if app.js never ran -->
       <div class="boot-fallback">
         <h2>Studyframe didn&rsquo;t start</h2>
         <p><code>app.js</code> or <code>styles.css</code> could not be loaded.</p>
-        <p>All three files must be in the <b>same folder</b>.</p>
-        <p>Press <kbd>F12</kbd> → Console to see what is missing.</p>
+        <p>All three files &mdash; <code>index.html</code>, <code>styles.css</code> and
+           <code>app.js</code> &mdash; have to sit in the <b>same folder</b>. Opening
+           <code>index.html</code> on its own gives you this page.</p>
+        <p>Press <kbd>F12</kbd> and open the Console tab to see which file is missing.</p>
       </div>
     </main>
   </div>
 </div>
 
+<!-- ============================ mobile tab bar ============================ -->
 <nav class="tabbar" id="tabbar" aria-label="Sections"></nav>
 
-<!-- overlays -->
+<!-- ============================ overlays ============================ -->
 <div class="modal" id="palette" hidden role="dialog" aria-modal="true" aria-label="Search">
   <div class="modal-box palette-box">
     <div class="palette-head">
