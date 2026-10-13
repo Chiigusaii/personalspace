@@ -1,15 +1,17 @@
 /* =============================================================================
    Studyframe — app.js
    Notes, timetable, tasks, files and certificates. Everything stays in this
-   browser: state in localStorage, uploaded files in IndexedDB. No build step,
-   no server, no dependencies. Works from file:// and from GitHub Pages.
+   browser (state in localStorage, uploaded files in IndexedDB) and, if you
+   connect it, is mirrored to a private GitHub repository of your own so every
+   device sees the same data. No build step, no server, no dependencies.
 
    Sections
      1  helpers            6  view: timetable      11 file store
      2  state + migration  7  view: tasks          12 reminders
      3  markup safety      8  view: files          13 sheets + search
      4  view: home         9  view: certificates   14 actions + events
-     5  view: notes       10  view: settings       15 boot
+     5  view: notes       10  view: settings       15 cloud sync
+                                                   16 boot
    ============================================================================= */
 
 /* =============================================================================
@@ -105,6 +107,7 @@ function heat(t) {
   return prio(t.priority).v * 40 + near;
 }
 
+
 /* =============================================================================
    2 — file blobs (IndexedDB) + state
    ============================================================================= */
@@ -116,6 +119,8 @@ const dbp = new Promise((res, rej) => {
     r.onerror = () => rej(r.error);
   } catch (e) { rej(e); }
 });
+dbp.catch(() => { /* private window: blobs fall back to memory below */ });
+const MEMBLOBS = new Map();
 const blobs = {
   async run(mode, fn) {
     const db = await dbp;
@@ -126,83 +131,104 @@ const blobs = {
       req.onerror = () => rej(req.error);
     });
   },
-  put: (id, blob) => blobs.run('readwrite', s => s.put(blob, id)),
-  get: id => blobs.run('readonly', s => s.get(id)),
-  del: id => blobs.run('readwrite', s => s.delete(id)),
+  async put(id, blob) {
+    MEMBLOBS.set(id, blob);
+    try { await blobs.run('readwrite', s => s.put(blob, id)); } catch (e) { /* kept in memory for this session */ }
+  },
+  async get(id) {
+    try { const b = await blobs.run('readonly', s => s.get(id)); if (b) return b; } catch (e) { /* fall through */ }
+    return MEMBLOBS.get(id) || null;
+  },
+  async del(id) {
+    MEMBLOBS.delete(id);
+    try { await blobs.run('readwrite', s => s.delete(id)); } catch (e) { /* nothing stored */ }
+  },
 };
 
 const KEY = 'studyframe.v3';
 const OLD_KEYS = ['studyframe.v2', 'studyframe.v1'];
 
+/* The collections that are the same on every device. Everything else in S
+   (which view is open, which week the timetable shows…) stays per device. */
+const SYNCED = ['subjects', 'notes', 'classes', 'events', 'tasks', 'folders', 'files', 'certs'];
+
+/* Seed records have fixed ids and a sync time of 0, so two devices that both
+   start from the example workspace merge into one copy instead of two. */
 function seed() {
-  const a = uid(), b = uid(), c = uid();
+  const a = 'seed-psy', b = 'seed-math', c = 'seed-law';
   const t = new Date();
   return {
-    v: 3,
+    v: 4,
     view: 'home', railOpen: false,
     activeSubject: a, noteId: null, fileId: null, folderId: null,
-    ttMode: 'week', ttDate: todayISO(), ttDensity: 'fit',
-    taskView: 'board', taskShowDone: false, fileView: 'grid',
+    ttMode: 'week', ttDate: todayISO(),
+    taskView: 'board', taskShowDone: false, fileView: 'icons', fileSort: { key: 'name', dir: 1 },
     settings: { name: 'there', lead: 15, sound: true, allDay: '09:00', dayStart: 8, dayEnd: 21 },
+    settingsAt: 0,
     subjects: [
-      { id: a, name: 'Cognitive Psychology', code: 'PSY 210', hue: 232 },
-      { id: b, name: 'Linear Algebra', code: 'MATH 152', hue: 168 },
-      { id: c, name: 'Media Law', code: 'LAW 118', hue: 38 },
+      { id: a, name: 'Cognitive Psychology', code: 'PSY 210', hue: 232, _t: 0 },
+      { id: b, name: 'Linear Algebra', code: 'MATH 152', hue: 168, _t: 0 },
+      { id: c, name: 'Media Law', code: 'LAW 118', hue: 38, _t: 0 },
     ],
     notes: [{
-      id: uid(), subjectId: a, title: 'Week 3 — Working memory',
-      html: '<p>This page behaves like a notebook. Select any text and use the bar above to set it in <strong>bold</strong>, <em>italic</em>, <u>underline</u> or <mark>highlight</mark>.</p><p></p><h2>What the toolbar gives you</h2><ul><li>Headings, bullet and numbered lists</li><li>Quotes, inline code and links</li><li>Undo, redo, and a button that strips formatting back to plain text</li></ul><p></p><blockquote>Attach a lecture PDF at the foot of the page and it opens from here.</blockquote>',
-      files: [], updated: Date.now(), created: Date.now(),
+      id: 'seed-note-1', subjectId: a, title: 'Week 3 — Working memory',
+      html: '<p>This notebook behaves like a real one. Select any text and use the bar above to set it in <strong>bold</strong>, <em>italic</em>, <u>underline</u> or <mark>highlight</mark>.</p><p></p><h2>What the toolbar gives you</h2><ul><li>Headings, bullet and numbered lists</li><li>Quotes, inline code and links</li><li>Undo, redo, and a button that strips formatting back to plain text</li></ul><p></p><blockquote>Keep writing past the bottom of a page and the book turns to the next one by itself.</blockquote>',
+      files: [], updated: Date.now(), created: Date.now(), _t: 0,
     }],
     classes: [
-      { id: uid(), subjectId: a, title: 'Lecture', weekday: 0, start: '09:00', end: '10:30', room: 'B-204', remind: null },
-      { id: uid(), subjectId: b, title: 'Tutorial', weekday: 1, start: '13:00', end: '14:00', room: 'M-11', remind: null },
-      { id: uid(), subjectId: a, title: 'Lab', weekday: 2, start: '11:00', end: '13:00', room: 'Psy Lab 2', remind: 30 },
-      { id: uid(), subjectId: c, title: 'Seminar', weekday: 4, start: '10:00', end: '12:00', room: 'L-301', remind: null },
+      { id: 'seed-cls-1', subjectId: a, title: 'Lecture', weekday: 0, start: '09:00', end: '10:30', room: 'B-204', remind: null, _t: 0 },
+      { id: 'seed-cls-2', subjectId: b, title: 'Tutorial', weekday: 1, start: '13:00', end: '14:00', room: 'M-11', remind: null, _t: 0 },
+      { id: 'seed-cls-3', subjectId: a, title: 'Lab', weekday: 2, start: '11:00', end: '13:00', room: 'Psy Lab 2', remind: 30, _t: 0 },
+      { id: 'seed-cls-4', subjectId: c, title: 'Seminar', weekday: 4, start: '10:00', end: '12:00', room: 'L-301', remind: null, _t: 0 },
     ],
     events: [
-      { id: uid(), subjectId: b, title: 'Study group', date: iso(addDays(t, 1)), start: '16:00', end: '18:00', room: 'Library 3F', remind: 30 },
+      { id: 'seed-evt-1', subjectId: b, title: 'Study group', date: iso(addDays(t, 1)), start: '16:00', end: '18:00', room: 'Library 3F', remind: 30, _t: 0 },
     ],
     tasks: [
-      { id: uid(), subjectId: a, title: 'Read Baddeley ch. 4', date: todayISO(), time: '', done: false, order: 0, remind: null, priority: 2, steps: [], created: Date.now() },
-      { id: uid(), subjectId: b, title: 'Problem set 3', date: iso(addDays(t, 2)), time: '23:59', done: false, order: 1, remind: null, priority: 3, steps: [{ id: uid(), text: 'Questions 1–4', done: true }, { id: uid(), text: 'Questions 5–8', done: false }], created: Date.now() },
-      { id: uid(), subjectId: c, title: 'Case brief draft', date: iso(addDays(t, 6)), time: '17:00', done: false, order: 2, remind: null, priority: 1, steps: [], created: Date.now() },
+      { id: 'seed-task-1', subjectId: a, title: 'Read Baddeley ch. 4', date: todayISO(), time: '', done: false, order: 0, remind: null, priority: 2, steps: [], created: Date.now(), _t: 0 },
+      { id: 'seed-task-2', subjectId: b, title: 'Problem set 3', date: iso(addDays(t, 2)), time: '23:59', done: false, order: 1, remind: null, priority: 3, steps: [{ id: 'seed-step-1', text: 'Questions 1–4', done: true }, { id: 'seed-step-2', text: 'Questions 5–8', done: false }], created: Date.now(), _t: 0 },
+      { id: 'seed-task-3', subjectId: c, title: 'Case brief draft', date: iso(addDays(t, 6)), time: '17:00', done: false, order: 2, remind: null, priority: 1, steps: [], created: Date.now(), _t: 0 },
     ],
     folders: [
-      { id: uid(), name: 'Lecture slides', created: Date.now() },
-      { id: uid(), name: 'Readings', created: Date.now() },
+      { id: 'seed-fld-1', name: 'Lecture slides', parentId: null, created: Date.now(), _t: 0 },
+      { id: 'seed-fld-2', name: 'Readings', parentId: null, created: Date.now(), _t: 0 },
     ],
     files: [],
     certs: [],
+    deleted: {},
     fired: {},
   };
 }
 
-/** Bring anything older up to the v3 shape without losing a keystroke. */
+/** Bring anything older up to the current shape without losing a keystroke. */
 function upgrade(s) {
   const d = seed();
-  s.v = 3;
+  s.v = 4;
   s.settings = Object.assign({}, d.settings, s.settings || {});
-  ['subjects', 'notes', 'classes', 'events', 'tasks', 'folders', 'files', 'certs'].forEach(k => {
-    if (!Array.isArray(s[k])) s[k] = [];
-  });
+  SYNCED.forEach(k => { if (!Array.isArray(s[k])) s[k] = []; });
   if (!s.subjects.length) s.subjects = d.subjects;
-  s.fired = s.fired || {};
+  s.fired = s.fired && typeof s.fired === 'object' ? s.fired : {};
+  s.deleted = s.deleted && typeof s.deleted === 'object' ? s.deleted : {};
+  s.settingsAt = Number(s.settingsAt) || 0;
   s.ttMode = ['week', 'day', 'agenda'].includes(s.ttMode) ? s.ttMode : 'week';
-  s.ttDensity = s.ttDensity === 'roomy' ? 'roomy' : 'fit';
+  delete s.ttDensity;                                              // one timetable layout now
   s.taskView = s.taskView === 'list' ? 'list' : 'board';
-  s.fileView = s.fileView === 'list' ? 'list' : 'grid';
+  s.fileView = (s.fileView === 'list' || s.fileView === 'details') ? 'details' : 'icons';
+  if (!s.fileSort || !['name', 'date', 'type', 'size'].includes(s.fileSort.key)) s.fileSort = { key: 'name', dir: 1 };
   s.ttDate = /^\d{4}-\d{2}-\d{2}$/.test(s.ttDate || '') ? s.ttDate : todayISO();
   if (s.view === 'deadlines') s.view = 'tasks';
   if (s.view === 'reminders') s.view = 'settings';
   if (s.view === 'vault') s.view = 'files';
+  if (!['home', 'notes', 'timetable', 'tasks', 'files', 'certificates', 'settings'].includes(s.view)) s.view = 'home';
 
   s.subjects.forEach(x => { if (typeof x.hue !== 'number') x.hue = 232; });
   s.notes.forEach(n => {
     n.files = Array.isArray(n.files) ? n.files : [];
     if (n.html === undefined) n.html = mdToHTML(n.body || '');      // v1/v2 stored Markdown
     delete n.body;
+    n.title = n.title || '';
     n.created = n.created || n.updated || Date.now();
+    n.updated = n.updated || n.created;
   });
   s.tasks.forEach((t, i) => {
     if (typeof t.priority !== 'number') t.priority = 1;
@@ -213,7 +239,10 @@ function upgrade(s) {
   });
   s.classes.forEach(c => { if (c.remind === undefined) c.remind = null; });
   s.events.forEach(e => { if (e.remind === undefined) e.remind = null; });
-  s.files.forEach(f => { if (f.folderId === undefined) f.folderId = null; });
+  s.folders.forEach(f => { if (f.parentId === undefined || !s.folders.some(x => x.id === f.parentId)) f.parentId = null; });
+  s.files.forEach(f => { if (f.folderId === undefined || (f.folderId && !s.folders.some(x => x.id === f.folderId))) f.folderId = null; });
+  if (s.folderId === '__unfiled' || (s.folderId && !s.folders.some(x => x.id === s.folderId))) s.folderId = null;
+  SYNCED.forEach(k => s[k].forEach(r => { if (typeof r._t !== 'number') r._t = 0; }));
   if (!s.subjects.some(x => x.id === s.activeSubject)) s.activeSubject = s.subjects[0].id;
   return s;
 }
@@ -233,10 +262,14 @@ function loadState() {
 }
 
 let S = loadState();
+let storageOK = true;
 
 function save() {
-  try { localStorage.setItem(KEY, JSON.stringify(S)); }
-  catch (e) { toast('Storage is full. Export a backup, then delete a few files.'); }
+  try { localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; }
+  catch (e) {
+    if (storageOK) toast('This browser refused to save. Export a backup, or connect sync in Settings.');
+    storageOK = false;
+  }
 }
 
 // Write the seeded (or migrated) state straight away, so a first visit that
@@ -250,12 +283,43 @@ const persist = debounce(() => {
   setTimeout(() => { if (el.textContent === 'Saved') el.textContent = ''; }, 1500);
 }, 400);
 
-/** Mutate → autosave → re-render. {quiet:true} skips the re-render (typing). */
+/* ---------- change tracking for sync ----------
+   After every change, each record is compared with how it looked last time.
+   Anything new or different gets a fresh `_t`; anything gone gets a tombstone
+   in S.deleted. Sync then merges record by record, newest wins. */
+const sansT = r => JSON.stringify(r, (k, v) => (k === '_t' ? undefined : v));
+let SNAP = new Map(), SNAP_SETTINGS = '';
+function snapshot() {
+  SNAP = new Map();
+  SYNCED.forEach(k => S[k].forEach(r => SNAP.set(r.id, sansT(r))));
+  SNAP_SETTINGS = JSON.stringify(S.settings);
+}
+function stamp() {
+  const now = Date.now();
+  let changed = false;
+  const seen = new Set();
+  SYNCED.forEach(k => S[k].forEach(r => {
+    if (!r.id) r.id = uid();
+    seen.add(r.id);
+    const j = sansT(r);
+    if (SNAP.get(r.id) !== j) { r._t = now; changed = true; delete S.deleted[r.id]; }
+  }));
+  SNAP.forEach((_, id) => { if (!seen.has(id)) { S.deleted[id] = now; changed = true; } });
+  const st = JSON.stringify(S.settings);
+  if (st !== SNAP_SETTINGS) { S.settingsAt = now; changed = true; }
+  if (changed) snapshot();
+  return changed;
+}
+snapshot();
+
+/** Mutate → stamp → autosave → re-render. {quiet:true} skips the re-render (typing). */
 function commit(fn, opts = {}) {
   fn(S);
+  const changed = stamp();
   const el = $('#saved');
   if (el) el.textContent = 'Saving';
   persist();
+  if (changed && typeof schedulePush === 'function') schedulePush();
   if (!opts.quiet) render();
 }
 
@@ -265,11 +329,13 @@ const activeSubj = () => subj(S.activeSubject) || S.subjects[0];
 const hue = id => { const s = subj(id); return s ? `hsl(${s.hue} 62% 66%)` : 'var(--rule2)'; };
 const code = id => subj(id)?.code || '';
 const openTasks = () => S.tasks.filter(t => !t.done);
-const folderName = id => S.folders.find(f => f.id === id)?.name || 'Unfiled';
+const folderById = id => S.folders.find(f => f.id === id);
+const folderName = id => folderById(id)?.name || 'Files';
 const noteText = n => String(n.html || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/g, ' ');
 
 function toast(msg) {
   const el = $('#toast');
+  if (!el) return;
   el.textContent = msg;
   el.hidden = false;
   el.style.animation = 'none';
@@ -537,73 +603,290 @@ function tapeHTML(key, blocks) {
   </section>`;
 }
 
+
 /* =============================================================================
-   5 — view: notes (the paper surface)
+   5 — view: notes, as a notebook
+   Each note is a book. Closed, you see its cover; open, you write on ruled
+   pages that sit side by side like a spread (one page at a time on a phone).
+   Text that reaches the foot of a page flows onto the next one and the book
+   turns the page for you. The note itself is still one piece of rich text —
+   the pages are drawn with CSS columns, so nothing about saving changes.
    ============================================================================= */
+const BOOK = { id: null, open: false, spread: 0, per: 2, pages: 1, stride: 0, lines: 0, w: 0, turning: false };
+const PAGES_SEEN = new Map();                     // note id → page count, for the cover
+const MARK = new Map();                           // note id → last spread, a bookmark per session
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 function viewNotes() {
   const s = activeSubj();
   const notes = S.notes.filter(n => n.subjectId === s.id).sort((a, b) => b.updated - a.updated);
   if (!notes.some(n => n.id === S.noteId)) S.noteId = notes[0]?.id || null;
   const note = S.notes.find(n => n.id === S.noteId);
+  if (!note || BOOK.id !== note.id) {
+    if (BOOK.id) MARK.set(BOOK.id, BOOK.spread);
+    BOOK.id = note?.id || null; BOOK.open = false; BOOK.spread = MARK.get(BOOK.id) || 0;
+  }
 
-  const rail = `<div class="note-rail">
-    <button class="btn btn-accent" data-act="new-note" style="justify-content:center">${icon('plus')}New note</button>
-    ${notes.length ? `<div class="note-list">${notes.map(n => `
-      <button class="note-tab" data-act="open-note" data-id="${n.id}" aria-current="${n.id === S.noteId}">
-        <b>${esc(n.title || 'Untitled')}</b>
-        <span class="nm">${esc(fmtDate(new Date(n.updated), { day: '2-digit', month: 'short' }))}${n.files.length ? ` · ${n.files.length} file${n.files.length > 1 ? 's' : ''}` : ''}</span>
+  const shelf = `<aside class="shelf" aria-label="Notebooks in ${esc(s.code)}">
+    <button class="btn btn-accent shelf-new" data-act="new-note">${icon('plus')}New notebook</button>
+    ${notes.length ? `<div class="shelf-list">${notes.map(n => `
+      <button class="shelf-book" data-act="open-note" data-id="${n.id}" aria-current="${n.id === S.noteId}" style="--hue:${s.hue}">
+        <span class="mini-cover" aria-hidden="true"><i></i></span>
+        <span class="sb-txt"><b>${esc(n.title || 'Untitled')}</b>
+          <span>${esc(fmtDate(new Date(n.updated), { day: '2-digit', month: 'short' }))}${n.files.length ? ` · ${n.files.length} file${n.files.length > 1 ? 's' : ''}` : ''}</span></span>
       </button>`).join('')}</div>`
-    : `<p class="empty"><b>No notes in ${esc(s.code)}</b>Every note is filed under the subject in the top bar.</p>`}
+    : `<p class="empty"><b>No notebooks in ${esc(s.code)}</b>Every notebook is filed under the subject in the top bar.</p>`}
+  </aside>`;
+
+  if (!note) {
+    return `<div class="wrap"><div class="notes-layout">${shelf}
+      <section class="desk"><p class="empty"><b>The shelf is empty</b>Start a notebook and its cover appears here.</p></section></div></div>`;
+  }
+  return `<div class="wrap"><div class="notes-layout">${shelf}
+    <section class="desk" id="desk">${BOOK.open ? openBookHTML(note, s) : coverHTML(note, s)}</section>
+  </div></div>`;
+}
+
+function coverHTML(note, s) {
+  const words = (noteText(note).match(/\S+/g) || []).length;
+  const pages = PAGES_SEEN.get(note.id) || Math.max(1, Math.ceil(words / 170));
+  return `<div class="closed-book" id="closedBook" style="--hue:${s.hue}">
+    <div class="cover" data-act="open-book" role="button" tabindex="0" aria-label="Open ${esc(note.title || 'this notebook')}">
+      <span class="ribbon" aria-hidden="true"></span>
+      <span class="cover-band" aria-hidden="true"></span>
+      <div class="cover-frame">
+        <span class="cover-k">${esc(s.code)}</span>
+        <textarea class="cover-title" id="noteTitle" data-act="note-title" rows="1" placeholder="Name this notebook"
+          aria-label="Notebook title" autocomplete="off" maxlength="80" spellcheck="false">${esc(note.title)}</textarea>
+        <span class="cover-sub">${esc(s.name)}</span>
+        <span class="cover-rule" aria-hidden="true"></span>
+        <span class="cover-meta">${pages} page${pages === 1 ? '' : 's'} · ${words} word${words === 1 ? '' : 's'}</span>
+      </div>
+      <span class="cover-plate">Begun ${esc(fmtDate(new Date(note.created), { day: 'numeric', month: 'short', year: 'numeric' }))}</span>
+    </div>
+    <span class="book-edges" aria-hidden="true"></span>
+  </div>
+  <div class="cover-actions">
+    <button class="btn btn-accent" data-act="open-book">${icon('notes')}Open notebook</button>
+    <button class="btn btn-danger" data-act="del-note" data-id="${note.id}">${icon('trash')}Delete</button>
   </div>`;
+}
 
-  if (!note) return `<div class="wrap"><div class="notes-layout">${rail}<div class="desk"><p class="empty"><b>Nothing open</b>Make a note and this page turns into paper.</p></div></div></div>`;
-
+function openBookHTML(note, s) {
   const clean = cleanHTML(note.html);
   const attached = note.files.map(id => S.files.find(f => f.id === id)).filter(Boolean);
+  return `<div class="sheet-bar" id="toolbar">
+      ${tool('close-book', 'left', 'Close the notebook')}
+      <span class="tool-sep"></span>
+      ${tool('undo', 'undo', 'Undo')}${tool('redo', 'redo', 'Redo')}
+      <span class="tool-sep"></span>
+      ${tool('bold', 'bold', 'Bold')}${tool('italic', 'italic', 'Italic')}${tool('underline', 'underline', 'Underline')}${tool('strikeThrough', 'strike', 'Strikethrough')}
+      <span class="tool-sep"></span>
+      ${tool('h1', 'h1', 'Heading')}${tool('h2', 'h2', 'Subheading')}${tool('h3', 'h3', 'Small heading')}
+      <span class="tool-sep"></span>
+      ${tool('insertUnorderedList', 'ul', 'Bulleted list')}${tool('insertOrderedList', 'ol', 'Numbered list')}${tool('blockquote', 'quote', 'Quote')}
+      <span class="tool-sep"></span>
+      ${tool('mark', 'mark', 'Highlight')}${tool('code', 'code', 'Code')}${tool('link', 'link', 'Add a link')}${tool('removeFormat', 'eraser', 'Clear formatting')}
+      <span class="grow"></span>
+      <span class="wc" id="wordCount"></span>
+      ${tool('print', 'doc', 'Print this note')}
+      ${tool('delete-note', 'trash', 'Delete this note')}
+    </div>
 
-  return `<div class="wrap"><div class="notes-layout">
-    ${rail}
-    <div class="desk">
-      <article class="sheet">
-        <div class="sheet-bar" id="toolbar">
-          ${tool('undo', 'undo', 'Undo')}${tool('redo', 'redo', 'Redo')}
-          <span class="tool-sep"></span>
-          ${tool('bold', 'bold', 'Bold')}${tool('italic', 'italic', 'Italic')}${tool('underline', 'underline', 'Underline')}${tool('strikeThrough', 'strike', 'Strikethrough')}
-          <span class="tool-sep"></span>
-          ${tool('h1', 'h1', 'Heading')}${tool('h2', 'h2', 'Subheading')}${tool('h3', 'h3', 'Small heading')}
-          <span class="tool-sep"></span>
-          ${tool('insertUnorderedList', 'ul', 'Bulleted list')}${tool('insertOrderedList', 'ol', 'Numbered list')}${tool('blockquote', 'quote', 'Quote')}
-          <span class="tool-sep"></span>
-          ${tool('mark', 'mark', 'Highlight')}${tool('code', 'code', 'Code')}${tool('link', 'link', 'Add a link')}${tool('removeFormat', 'eraser', 'Clear formatting')}
-          <span class="grow"></span>
-          <span class="wc" id="wordCount"></span>
-          ${tool('print', 'doc', 'Print this note')}
-          ${tool('delete-note', 'trash', 'Delete this note')}
+    <div class="book-wrap" id="bookWrap">
+      <div class="book" id="book" style="--hue:${s.hue}">
+        <div class="pg pg-l">
+          <header class="pg-head"><span>${esc(note.title || 'Untitled')}</span></header>
+          <div class="pg-lines" aria-hidden="true"></div>
+          <footer class="pg-num" id="pnL"></footer>
         </div>
-
-        <input class="sheet-title" id="noteTitle" data-act="note-title" value="${esc(note.title)}" placeholder="Untitled" aria-label="Note title" autocomplete="off">
-        <p class="sheet-meta">
-          <span>${esc(s.code)} · ${esc(s.name)}</span>
-          <span>Saved ${esc(new Date(note.updated).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>
-        </p>
-
-        <div class="page">
+        <div class="pg pg-r">
+          <header class="pg-head"><span>${esc(s.code)} · ${esc(s.name)}</span></header>
+          <div class="pg-lines" aria-hidden="true"></div>
+          <footer class="pg-num" id="pnR"></footer>
+        </div>
+        <span class="spine" aria-hidden="true"></span>
+        <div class="pages-clip" id="pagesClip">
           <div class="paper-body" id="paperBody" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true"
                aria-label="Note" data-ph="Start writing.">${clean}</div>
         </div>
-
-        <div class="sheet-foot">
-          ${attached.map(f => `<span class="clip">${icon('doc')}<span class="n">${esc(f.name)}</span>
-            <button data-act="open-file" data-id="${f.id}" aria-label="Open ${esc(f.name)}">${icon('ext')}</button>
-            <button data-act="unattach" data-id="${f.id}" aria-label="Remove ${esc(f.name)}">${icon('close')}</button></span>`).join('')}
-          ${S.files.length ? `<span class="attach-pick"><label class="vh" for="attachSel">Attach a file</label>
-            <select id="attachSel" data-act="attach"><option value="">Attach a file…</option>
-            ${S.files.filter(f => !note.files.includes(f.id)).map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></span>`
-          : `<button class="clip" data-act="view" data-view="files">${icon('up-tray')}<span class="n">Upload a file first</span></button>`}
-        </div>
-      </article>
+        <button class="corner corner-prev" data-act="page-prev" aria-label="Previous page"></button>
+        <button class="corner corner-next" data-act="page-next" aria-label="Next page"></button>
+      </div>
     </div>
-  </div></div>`;
+
+    <div class="book-nav">
+      <button class="btn btn-sm" data-act="page-prev" id="prevBtn">${icon('left')}<span>Previous</span></button>
+      <span class="page-label" id="pageLabel">Page 1</span>
+      <button class="btn btn-sm" data-act="page-next" id="nextBtn"><span>Next</span>${icon('right')}</button>
+    </div>
+
+    <div class="sheet-foot">
+      ${attached.map(f => `<span class="clip">${icon('doc')}<span class="n">${esc(f.name)}</span>
+        <button data-act="open-file" data-id="${f.id}" aria-label="Open ${esc(f.name)}">${icon('ext')}</button>
+        <button data-act="unattach" data-id="${f.id}" aria-label="Remove ${esc(f.name)}">${icon('close')}</button></span>`).join('')}
+      ${S.files.length ? `<span class="attach-pick"><label class="vh" for="attachSel">Attach a file</label>
+        <select id="attachSel" data-act="attach"><option value="">Attach a file…</option>
+        ${S.files.filter(f => !note.files.includes(f.id)).map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select></span>`
+      : `<button class="clip" data-act="view" data-view="files">${icon('up-tray')}<span class="n">Upload a file to attach it</span></button>`}
+    </div>`;
+}
+
+/* ---------- page geometry ---------- */
+const PAGE = { head: 44, foot: 40, padL: 62, padR: 30 };
+
+/** Size the book to the screen and set up the columns that make the pages. */
+function layoutBook(force) {
+  const book = $('#book'), body = $('#paperBody'), wrap = $('#bookWrap');
+  if (!book || !body || !wrap) return;
+  const cs = getComputedStyle(wrap);
+  const avail = Math.floor(wrap.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+  if (!force && avail === BOOK.w && BOOK.lines) { measureBook(); return; }
+  BOOK.w = avail;
+
+  const lh = MOBILE ? 28 : 30;
+  BOOK.per = !MOBILE && avail >= 780 ? 2 : 1;
+  const pageW = Math.floor(Math.min(avail, BOOK.per === 2 ? 1120 : 640) / BOOK.per);
+  const top = wrap.getBoundingClientRect().top - ($('#main').getBoundingClientRect().top || 0);
+  const room = window.innerHeight - Math.max(0, top) - (MOBILE ? 250 : 200);
+  BOOK.lines = clamp(Math.floor((room - PAGE.head - PAGE.foot) / lh), MOBILE ? 12 : 14, 22);
+
+  const padL = MOBILE ? 44 : PAGE.padL, padR = MOBILE ? 20 : PAGE.padR;
+  const textW = pageW - padL - padR;
+  const gap = padL + padR;
+  BOOK.stride = textW + gap;
+  BOOK.textW = textW; BOOK.gap = gap;
+
+  book.classList.toggle('single', BOOK.per === 1);
+  book.style.setProperty('--lh', `${lh}px`);
+  book.style.setProperty('--page-w', `${pageW}px`);
+  book.style.setProperty('--pad-l', `${padL}px`);
+  book.style.setProperty('--pad-r', `${padR}px`);
+  book.style.setProperty('--text-h', `${BOOK.lines * lh}px`);
+  book.style.width = `${pageW * BOOK.per}px`;
+  body.style.columnGap = `${gap}px`;
+  BOOK.cols = 0;
+  measureBook();
+}
+
+/** Count the pages the text fills and keep a spare one ready after it. */
+function measureBook() {
+  const body = $('#paperBody');
+  if (!body || !BOOK.stride) return;
+  const ensure = n => {
+    if (n === BOOK.cols) return;
+    BOOK.cols = n;
+    body.style.columnCount = String(n);
+    body.style.width = `${n * BOOK.textW + (n - 1) * BOOK.gap}px`;
+  };
+  if (!BOOK.cols) ensure(BOOK.per * 2);
+  const left = body.getBoundingClientRect().left;
+  let right = left;
+  const r = document.createRange();
+  r.selectNodeContents(body);
+  for (const rect of r.getClientRects()) if (rect.width || rect.height) right = Math.max(right, rect.right);
+  for (const el of body.children) for (const rect of el.getClientRects()) right = Math.max(right, rect.right);
+  const pages = Math.max(1, Math.floor((right - left - 1) / BOOK.stride) + 1);
+  BOOK.pages = pages;
+  PAGES_SEEN.set(BOOK.id, pages);
+  const want = Math.ceil((pages + 1) / BOOK.per) * BOOK.per;
+  if (want > BOOK.cols || want < BOOK.cols - BOOK.per) ensure(want);
+  BOOK.spread = clamp(BOOK.spread, 0, lastSpread());
+  paintSpread();
+}
+const lastSpread = () => Math.max(0, Math.ceil(BOOK.pages / BOOK.per) - 1);
+
+function paintSpread() {
+  const body = $('#paperBody');
+  if (!body) return;
+  body.style.transform = `translateX(${-BOOK.spread * BOOK.per * BOOK.stride}px)`;
+  const first = BOOK.spread * BOOK.per + 1;
+  const l = $('#pnL'), rr = $('#pnR'), lab = $('#pageLabel');
+  if (l) l.textContent = first <= BOOK.pages ? `— ${first} —` : '';
+  if (rr) rr.textContent = BOOK.per === 2 && first + 1 <= BOOK.pages ? `— ${first + 1} —` : '';
+  if (lab) {
+    lab.textContent = BOOK.per === 2 && first + 1 <= BOOK.pages
+      ? `Pages ${first}–${first + 1} of ${BOOK.pages}` : `Page ${first} of ${BOOK.pages}`;
+  }
+  const atStart = BOOK.spread === 0, atEnd = BOOK.spread >= lastSpread();
+  $$('[data-act="page-prev"]').forEach(b => { b.disabled = atStart; });
+  $$('[data-act="page-next"]').forEach(b => { b.disabled = atEnd; });
+}
+
+/** Which page the caret is on, counted from 0. */
+function caretPage() {
+  const body = $('#paperBody'), sel = window.getSelection();
+  if (!body || !sel || !sel.rangeCount || !body.contains(sel.focusNode)) return null;
+  const range = document.createRange();
+  try { range.setStart(sel.focusNode, sel.focusOffset); } catch (e) { return null; }
+  range.collapse(true);
+  let rect = [...range.getClientRects()].find(x => x.height);
+  if (!rect) {
+    let el = sel.focusNode.nodeType === 1 ? (sel.focusNode.childNodes[sel.focusOffset] || sel.focusNode) : sel.focusNode.parentNode;
+    if (el && el.nodeType !== 1) el = el.parentNode;
+    if (el === body) el = body.children[Math.min(sel.focusOffset, body.children.length - 1)];
+    rect = el?.getClientRects?.()[0];
+  }
+  if (!rect) return null;
+  const x = rect.left + 1 - body.getBoundingClientRect().left;
+  return Math.max(0, Math.floor(x / BOOK.stride));
+}
+
+/** Turn the book to show the page the caret has moved onto. */
+function followCaret() {
+  const body = $('#paperBody');
+  if (!body || document.activeElement !== body || BOOK.turning) return;
+  const p = caretPage();
+  if (p === null) return;
+  const spread = Math.floor(p / BOOK.per);
+  if (spread !== BOOK.spread) turnTo(spread);
+}
+
+function turnTo(target, opts = {}) {
+  const book = $('#book');
+  target = clamp(target, 0, lastSpread());
+  if (!book || target === BOOK.spread) { paintSpread(); return; }
+  const forward = target > BOOK.spread;
+  const finish = () => {
+    BOOK.spread = target;
+    MARK.set(BOOK.id, target);
+    paintSpread();
+    if (opts.placeCaret) caretToSpread();
+  };
+  if (reducedMotion() || BOOK.turning) { finish(); return; }
+
+  BOOK.turning = true;
+  const leaf = document.createElement('div');
+  leaf.className = `leaf ${forward ? 'fwd' : 'back'} ${BOOK.per === 1 ? 'one' : 'two'}`;
+  leaf.innerHTML = '<span class="leaf-face front"></span><span class="leaf-face rear"></span>';
+  book.appendChild(leaf);
+  book.classList.add('turning');
+  setTimeout(finish, 280);
+  setTimeout(() => {
+    leaf.remove();
+    book.classList.remove('turning');
+    BOOK.turning = false;
+    followCaret();
+  }, 620);
+}
+
+/** After a manual page turn, put the caret at the top of the new page. */
+function caretToSpread() {
+  const body = $('#paperBody'), clip = $('#pagesClip');
+  if (!body || !clip || document.activeElement !== body) return;
+  const r = clip.getBoundingClientRect();
+  const x = r.left + 4, y = r.top + 6;
+  let range = null;
+  if (document.caretRangeFromPoint) range = document.caretRangeFromPoint(x, y);
+  else if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (p) { range = document.createRange(); range.setStart(p.offsetNode, p.offset); }
+  }
+  if (range && body.contains(range.startContainer)) {
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    saveRange();
+  }
 }
 
 const tool = (cmd, ic, label) =>
@@ -619,7 +902,7 @@ function saveRange() {
 function restoreRange() {
   const body = $('#paperBody');
   if (!body) return false;
-  body.focus();
+  body.focus({ preventScroll: true });
   if (!savedRange) return false;
   const sel = window.getSelection();
   sel.removeAllRanges();
@@ -665,6 +948,7 @@ function runTool(cmd) {
 
   if (cmd === 'delete-note') return actions['del-note'](null, { dataset: { id: S.noteId } });
   if (cmd === 'print') return window.print();
+  if (cmd === 'close-book') return actions['close-book']();
 
   restoreRange();
   switch (cmd) {
@@ -699,18 +983,6 @@ function afterEdit() {
   syncTools();
 }
 
-const saveNoteBody = debounce(() => {
-  const body = $('#paperBody');
-  if (!body) return;
-  commit(s => {
-    const n = s.notes.find(x => x.id === s.noteId);
-    if (!n) return;
-    n.html = body.innerHTML;
-    n.updated = Date.now();
-  }, { quiet: true });
-  updateWordCount();
-}, 220);
-
 function updateWordCount() {
   const body = $('#paperBody'), out = $('#wordCount');
   if (!body || !out) return;
@@ -742,16 +1014,45 @@ function syncTools() {
   });
 }
 
+
+const saveNoteBody = debounce(() => {
+  const body = $('#paperBody');
+  if (!body) return;
+  commit(s => {
+    const n = s.notes.find(x => x.id === s.noteId);
+    if (!n) return;
+    n.html = body.innerHTML;
+    n.updated = Date.now();
+  }, { quiet: true });
+  updateWordCount();
+}, 220);
+
+function wireCover() {
+  const t = $('#noteTitle');
+  if (!t) return;
+  const fit = () => { t.style.height = 'auto'; t.style.height = `${t.scrollHeight}px`; };
+  fit();
+  t.addEventListener('input', () => { t.value = t.value.replace(/\n/g, ' '); fit(); });
+}
+
 function wireEditor() {
+  wireCover();
   const body = $('#paperBody');
   if (!body) return;
   try { document.execCommand('styleWithCSS', false, false); } catch (e) { /* fine */ }
   try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch (e) { /* fine */ }
   updateWordCount();
+  layoutBook(true);
+  if (document.fonts?.ready) document.fonts.ready.then(() => { if ($('#paperBody') === body) measureBook(); });
 
-  body.addEventListener('input', () => { saveNoteBody(); saveRange(); updateWordCount(); });
-  body.addEventListener('keyup', () => { saveRange(); syncTools(); });
+  const reflow = () => { measureBook(); followCaret(); };
+  // older browsers without overflow:clip may try to scroll the page frame to the caret — undo that
+  const clip = $('#pagesClip');
+  clip.addEventListener('scroll', () => { clip.scrollLeft = 0; clip.scrollTop = 0; });
+  body.addEventListener('input', () => { saveNoteBody(); saveRange(); updateWordCount(); reflow(); });
+  body.addEventListener('keyup', () => { saveRange(); syncTools(); followCaret(); });
   body.addEventListener('mouseup', () => { saveRange(); syncTools(); });
+  body.addEventListener('focus', () => requestAnimationFrame(followCaret));
   body.addEventListener('blur', () => {
     commit(s => {
       const n = s.notes.find(x => x.id === s.noteId);
@@ -765,14 +1066,18 @@ function wireEditor() {
     if (html) exec('insertHTML', cleanHTML(html));
     else exec('insertText', dt.getData('text/plain'));
     afterEdit();
+    reflow();
   });
   body.addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'b') { e.preventDefault(); runTool('bold'); }
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); runTool('italic'); }
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'u') { e.preventDefault(); runTool('underline'); }
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); runTool('mark'); }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); saveRange(); linkSheet(); }
+    const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+    if (mod && !e.shiftKey && k === 'b') { e.preventDefault(); runTool('bold'); }
+    if (mod && !e.shiftKey && k === 'i') { e.preventDefault(); runTool('italic'); }
+    if (mod && !e.shiftKey && k === 'u') { e.preventDefault(); runTool('underline'); }
+    if (mod && e.shiftKey && k === 'h') { e.preventDefault(); runTool('mark'); }
+    if (mod && k === 'k') { e.preventDefault(); saveRange(); linkSheet(); }
     if (e.key === 'Tab') { e.preventDefault(); exec(e.shiftKey ? 'outdent' : 'indent'); afterEdit(); }
+    if (e.key === 'PageDown') { e.preventDefault(); turnTo(BOOK.spread + 1, { placeCaret: true }); }
+    if (e.key === 'PageUp') { e.preventDefault(); turnTo(BOOK.spread - 1, { placeCaret: true }); }
   });
 
   const bar = $('#toolbar');
@@ -781,24 +1086,77 @@ function wireEditor() {
     const b = e.target.closest('.tool');
     if (b) runTool(b.dataset.tool);
   });
+
+  /* swipe to turn on touch screens — only a clear sideways flick counts */
+  const book = $('#book');
+  let sx = 0, sy = 0, st = 0;
+  book.addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
+  book.addEventListener('touchend', e => {
+    const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    const sel = window.getSelection();
+    if (Date.now() - st > 600 || Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+    if (sel && !sel.isCollapsed) return;
+    turnTo(BOOK.spread + (dx < 0 ? 1 : -1), { placeCaret: true });
+  }, { passive: true });
 }
+
+/* the caret can move without a key press (clicks, IME, toolbar) */
+document.addEventListener('selectionchange', debounce(() => {
+  if (document.activeElement && document.activeElement.id === 'paperBody') followCaret();
+}, 60));
 
 /* =============================================================================
    6 — view: timetable (absorbs reminders)
-   Fit mode hugs the hours you actually use, so a week fits on one screen.
+   One layout. The grid only spans the hours your week actually uses, then
+   sizes each hour so the whole week fits on screen — but never so small that
+   the shortest class can't show its name. Clashing entries sit side by side
+   instead of on top of each other.
    ============================================================================= */
-let TT = { lo: 480, hi: 1260, hours: 13 };
+let TT = { lo: 480, hi: 1260, hours: 13, minDur: 60 };
 
 function ttWindow(keys) {
-  let lo = S.settings.dayStart * 60, hi = S.settings.dayEnd * 60;
   const all = keys.flatMap(k => dayBlocks(k));
-  if (S.ttDensity === 'fit' && all.length) {
-    lo = Math.floor((Math.min(...all.map(b => toMin(b.start))) - 30) / 60) * 60;
-    hi = Math.ceil((Math.max(...all.map(b => toMin(b.end))) + 30) / 60) * 60;
+  let lo, hi;
+  if (all.length) {
+    lo = Math.min(...all.map(b => toMin(b.start)));
+    hi = Math.max(...all.map(b => toMin(b.end)));
+    lo = Math.floor((lo - 30) / 60) * 60;
+    hi = Math.ceil((hi + 30) / 60) * 60;
+    if (hi - lo < 240) {                                  // keep at least four hours visible
+      const mid = (lo + hi) / 2;
+      lo = Math.floor((mid - 120) / 60) * 60; hi = lo + 240;
+    }
+  } else {
+    lo = S.settings.dayStart * 60; hi = S.settings.dayEnd * 60;
   }
-  lo = clamp(lo, 0, 1140);
-  hi = clamp(hi, lo + 300, 1440);
-  return { lo, hi, hours: Math.max(1, Math.round((hi - lo) / 60)) };
+  lo = clamp(lo, 0, 1200);
+  hi = clamp(hi, lo + 240, 1440);
+  const minDur = all.length ? Math.max(15, Math.min(...all.map(b => Math.max(1, toMin(b.end) - toMin(b.start))))) : 60;
+  return { lo, hi, hours: Math.max(1, Math.round((hi - lo) / 60)), minDur };
+}
+
+/** Side-by-side lanes for entries that overlap in time. */
+function laneLayout(blocks) {
+  // very short entries are drawn at least ~30 min tall, so lay them out as if they were
+  const items = blocks.map(b => ({ b, s: toMin(b.start), e: Math.max(toMin(b.end), toMin(b.start) + 30) }))
+    .sort((a, b) => a.s - b.s || b.e - a.e);
+  let cluster = [], clusterEnd = -1;
+  const flush = () => {
+    const lanes = [];
+    cluster.forEach(it => {
+      let i = lanes.findIndex(end => end <= it.s);
+      if (i < 0) { i = lanes.length; lanes.push(0); }
+      lanes[i] = it.e; it.lane = i;
+    });
+    cluster.forEach(it => { it.n = lanes.length; });
+    cluster = [];
+  };
+  items.forEach(it => {
+    if (cluster.length && it.s >= clusterEnd) flush();
+    cluster.push(it); clusterEnd = Math.max(clusterEnd, it.e);
+  });
+  flush();
+  return items;
 }
 
 function ttBar(label, mode) {
@@ -806,7 +1164,7 @@ function ttBar(label, mode) {
   return `<div class="tt-bar">
     <div class="tt-nav">
       <button data-act="shift" data-n="${-step}" aria-label="Previous">${icon('left')}</button>
-      <button class="mid" data-act="today">${esc(label)}</button>
+      <button class="mid" data-act="today" title="Back to today">${esc(label)}</button>
       <button data-act="shift" data-n="${step}" aria-label="Next">${icon('right')}</button>
     </div>
     <div class="seg">
@@ -814,12 +1172,6 @@ function ttBar(label, mode) {
       <button data-act="mode" data-mode="day" aria-pressed="${mode === 'day'}">Day</button>
       <button data-act="mode" data-mode="agenda" aria-pressed="${mode === 'agenda'}">Agenda</button>
     </div>
-    <span class="spacer"></span>
-    ${mode === 'week' && !MOBILE ? `<div class="seg">
-      <button data-act="density" data-d="fit" aria-pressed="${S.ttDensity === 'fit'}" title="Fit the whole week on screen">Compact</button>
-      <button data-act="density" data-d="roomy" aria-pressed="${S.ttDensity === 'roomy'}" title="Full day, taller rows">Roomy</button>
-    </div>` : ''}
-    <button class="btn btn-accent" data-act="new-entry" data-date="${esc(S.ttDate)}">${icon('plus')}Add entry</button>
   </div>`;
 }
 
@@ -838,23 +1190,25 @@ function timetableWeek(cur) {
   const pct = m => ((clamp(m, W.lo, W.hi) - W.lo) / span) * 100;
 
   const gutter = [];
-  for (let m = W.lo; m <= W.hi; m += 60) gutter.push(`<span style="top:${pct(m)}%">${pad(m / 60)}:00</span>`);
+  for (let m = W.lo; m < W.hi; m += 60) gutter.push(`<span style="top:${pct(m)}%">${pad(m / 60)}:00</span>`);
 
   const heads = [], cols = [];
   keys.forEach((key, i) => {
     const d = parseISO(key), isToday = key === todayISO();
     const tasks = S.tasks.filter(t => t.date === key && !t.done);
-    heads.push(`<div class="tt-dayhead ${isToday ? 'is-today' : ''}">
+    heads.push(`<button class="tt-dayhead ${isToday ? 'is-today' : ''}" data-act="goto-day" data-date="${key}" title="Open ${DAY_FULL[i]}">
       <span class="dw">${DAY[i]}</span><span class="dn">${d.getDate()}</span>
       <span class="pips">${tasks.slice(0, 4).map(t => `<i style="--pcol:${prio(t.priority).css}"></i>`).join('')}</span>
-    </div>`);
+    </button>`);
 
-    const blocks = dayBlocks(key).map(b => blockHTML(b, pct)).join('');
+    const blocks = laneLayout(dayBlocks(key)).map(it => blockHTML(it, pct)).join('');
+    /* tasks due outside the hours shown are pinned to the top or bottom edge */
     const chips = tasks.filter(t => t.time).map(t => {
       const m = toMin(t.time);
-      if (m < W.lo || m > W.hi) return '';
-      return `<button class="tt-task" style="top:calc(${pct(m)}% - 8px);--pcol:${prio(t.priority).css}"
-        data-act="edit-task" data-id="${t.id}" title="${esc(t.title)} · due ${esc(t.time)}">${icon('flag')}<b>${esc(t.title)}</b></button>`;
+      const pos = m < W.lo ? 'top:2px' : m > W.hi ? 'top:calc(100% - 18px)' : `top:clamp(2px, calc(${pct(m)}% - 8px), calc(100% - 18px))`;
+      const edge = m < W.lo || m > W.hi ? `<span class="tt-due">${esc(t.time)}</span>` : '';
+      return `<button class="tt-task" style="${pos};--pcol:${prio(t.priority).css}"
+        data-act="edit-task" data-id="${t.id}" title="${esc(t.title)} · due ${esc(t.time)}">${icon('flag')}<b>${esc(t.title)}</b>${edge}</button>`;
     }).join('');
 
     cols.push(`<div class="tt-col ${isToday ? 'is-today' : ''} ${i > 4 ? 'is-weekend' : ''}" data-act="new-entry" data-date="${key}" data-wd="${i}">
@@ -865,9 +1219,9 @@ function timetableWeek(cur) {
 
   return `<div class="wrap">
     ${ttBar(`Week of ${fmtDate(mon, { day: 'numeric', month: 'long' })}`, 'week')}
-    <div class="tt" id="ttGrid" style="--hourpx:${S.ttDensity === 'fit' ? 48 : 62}px">
+    <div class="tt" id="ttGrid">
       <div class="tt-days"><div></div>${heads.join('')}</div>
-      <div class="tt-body" id="ttBody" style="height:${W.hours * (S.ttDensity === 'fit' ? 48 : 62)}px">
+      <div class="tt-body" id="ttBody" style="height:${W.hours * 52}px">
         <div class="tt-gutter">${gutter.join('')}</div>
         ${cols.join('')}
       </div>
@@ -876,19 +1230,23 @@ function timetableWeek(cur) {
       <span><i style="background:color-mix(in srgb,var(--iris) 24%,#0E131B);border-left:3px solid var(--iris)"></i>Repeats weekly</span>
       <span><i style="background:#0E131B;border:1px dashed var(--rule2);border-left:3px solid var(--rule2)"></i>One-off, this date only</span>
       <span>${icon('bell')} has a reminder</span>
-      <span>Click an empty slot to add something there.</span>
+      <span>Showing ${pad(W.lo / 60)}:00–${pad(W.hi / 60)}:00 · click an empty slot to add something there</span>
     </p>
   </div>`;
 }
 
-function blockHTML(b, pct) {
+function blockHTML(it, pct) {
+  const b = it.b;
   const top = pct(toMin(b.start));
   const h = Math.max(1.6, pct(toMin(b.end)) - top);
+  const w = 100 / it.n;
   const bell = (b.remind !== null && b.remind !== undefined && b.remind >= 0) ? icon('bell', 'ic bell') : '';
-  return `<button class="tt-block ${b.kind === 'event' ? 'is-event' : ''}" style="top:${top}%;height:${h}%;--subject:${hue(b.subjectId)}"
+  const where = [code(b.subjectId), b.room].filter(Boolean).join(' · ');
+  return `<button class="tt-block ${b.kind === 'event' ? 'is-event' : ''}"
+    style="top:${top}%;height:${h}%;left:calc(${it.lane * w}% + 2px);width:calc(${w}% - 4px);--subject:${hue(b.subjectId)}"
     data-act="edit-entry" data-id="${b.id}" data-kind="${b.kind}" title="${esc(b.title)} · ${esc(b.start)}–${esc(b.end)}${b.room ? ' · ' + esc(b.room) : ''}">
-    ${bell}<span class="bn">${esc(b.title)}</span><span class="bt">${esc(b.start)}–${esc(b.end)}</span>
-    ${b.room || b.subjectId ? `<span class="br">${esc([code(b.subjectId), b.room].filter(Boolean).join(' · '))}</span>` : ''}
+    ${bell}<span class="bn">${esc(b.title)}<span class="bt-inline"> · ${esc(b.start)}</span></span><span class="bt">${esc(b.start)}–${esc(b.end)}</span>
+    ${where ? `<span class="br">${esc(where)}</span>` : ''}
   </button>`;
 }
 
@@ -898,24 +1256,23 @@ function nowLineHTML(pct) {
   return `<div class="tt-now" id="ttNow" style="top:${pct(m)}%"></div>`;
 }
 
-/** Sizes the grid to the space left on screen, then labels blocks by height. */
+/** Fit the whole week on screen, then label each entry by how much room it got. */
 function fitTimetable() {
   const grid = $('#ttGrid'), body = $('#ttBody');
   if (!grid || !body) return;
-  let px = 62;
-  if (S.ttDensity === 'fit') {
-    const head = $('.tt-days')?.offsetHeight || 46;
-    const top = grid.getBoundingClientRect().top;
-    const avail = window.innerHeight - top - head - 78;
-    px = clamp(avail / TT.hours, 34, 128);
-  }
+  const head = $('.tt-days')?.offsetHeight || 52;
+  const top = grid.getBoundingClientRect().top - $('#main').getBoundingClientRect().top;
+  const avail = window.innerHeight - $('#main').getBoundingClientRect().top - top - head - 56;
+  // fill the screen; never below 40px an hour (short entries have a minimum height of their own)
+  const px = clamp(avail / TT.hours, 40, 110);
   grid.style.setProperty('--hourpx', `${px}px`);
-  body.style.height = `${px * TT.hours}px`;
+  body.style.height = `${Math.round(px * TT.hours)}px`;
   $$('.tt-block', body).forEach(b => {
-    b.classList.remove('sm', 'md');
+    b.classList.remove('sm', 'md', 'narrow');
     const h = b.offsetHeight;
-    if (h < 34) b.classList.add('sm');
-    else if (h < 58) b.classList.add('md');
+    if (h < 36) b.classList.add('sm');
+    else if (h < 60) b.classList.add('md');
+    if (b.offsetWidth < 70) b.classList.add('narrow');
   });
 }
 
@@ -1035,6 +1392,7 @@ function timetableAgenda() {
     </div>
   </div>`;
 }
+
 
 /* =============================================================================
    7 — view: tasks (was Deadlines — now ordered by priority)
@@ -1182,105 +1540,341 @@ function taskCard(t, { compact = false } = {}) {
   </article>`;
 }
 
+
 /* =============================================================================
-   8 — view: files
+   8 — view: files, laid out like a file explorer
+   Back / forward / up, an address bar, a folder tree down the side, folders
+   that hold folders, large-icon and details views, sorting, right-click menus,
+   drag-to-move, and a status bar. On a phone the tree folds away, a tap opens
+   and each item carries a ⋯ menu.
    ============================================================================= */
-const EXT = n => (String(n).split('.').pop() || 'file').toUpperCase().slice(0, 4);
-const PREVIEWABLE = t => String(t).startsWith('image/') || t === 'application/pdf' || String(t).startsWith('text/');
-const size = b => b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
+const EXT = n => (String(n).includes('.') ? String(n).split('.').pop() : 'file').toUpperCase().slice(0, 4);
+const size = b => b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((b || 0) / 1024))} KB`;
+const XP = { back: [], fwd: [], sel: new Set(), q: '', open: new Set(), anchor: null };
 
 function ftype(f) {
   const t = String(f.type || ''), e = EXT(f.name);
-  if (t.startsWith('image/')) return { ic: 'img', c: '#58D6C0' };
-  if (t === 'application/pdf' || e === 'PDF') return { ic: 'doc', c: '#FF6B6B' };
-  if (['PPT', 'PPTX', 'KEY', 'ODP'].includes(e)) return { ic: 'layers', c: '#F6A524' };
-  if (['XLS', 'XLSX', 'CSV', 'TSV'].includes(e)) return { ic: 'grid', c: '#58D6C0' };
-  if (['DOC', 'DOCX', 'ODT', 'RTF'].includes(e)) return { ic: 'doc', c: '#7C8CF8' };
-  if (['ZIP', 'RAR', '7Z', 'TAR', 'GZ'].includes(e)) return { ic: 'layers', c: '#98A4BC' };
-  if (t.startsWith('audio/') || t.startsWith('video/')) return { ic: 'layers', c: '#C08CF8' };
-  if (t.startsWith('text/')) return { ic: 'doc', c: '#98A4BC' };
-  return { ic: 'doc', c: '#98A4BC' };
+  if (t.startsWith('image/')) return { c: '#58D6C0', label: 'Image' };
+  if (t === 'application/pdf' || e === 'PDF') return { c: '#FF6B6B', label: 'PDF document' };
+  if (['PPT', 'PPTX', 'KEY', 'ODP'].includes(e)) return { c: '#F6A524', label: 'Presentation' };
+  if (['XLS', 'XLSX', 'CSV', 'TSV', 'ODS'].includes(e)) return { c: '#4FBF7A', label: 'Spreadsheet' };
+  if (['DOC', 'DOCX', 'ODT', 'RTF'].includes(e)) return { c: '#7C8CF8', label: 'Word document' };
+  if (['ZIP', 'RAR', '7Z', 'TAR', 'GZ'].includes(e)) return { c: '#98A4BC', label: 'Archive' };
+  if (t.startsWith('audio/')) return { c: '#C08CF8', label: 'Audio' };
+  if (t.startsWith('video/')) return { c: '#C08CF8', label: 'Video' };
+  if (t.startsWith('text/')) return { c: '#98A4BC', label: 'Text document' };
+  return { c: '#98A4BC', label: `${e} file` };
+}
+
+/* drawn icons — no ids inside, so any number of copies can share a page */
+const folderSVG = full => `<svg class="fold-ic" viewBox="0 0 64 52" aria-hidden="true">
+  <path d="M4 8a4 4 0 0 1 4-4h15l6 6h27a4 4 0 0 1 4 4v4H4Z" fill="#C9962B"/>
+  <rect x="4" y="12" width="56" height="36" rx="4" fill="#D9A93A"/>
+  ${full ? '<rect x="11" y="9" width="40" height="22" rx="2" fill="#F4F1EA"/><rect x="15" y="6" width="36" height="20" rx="2" fill="#FFFFFF" opacity=".9"/>' : ''}
+  <path d="M2 20a4 4 0 0 1 4-4h52a4 4 0 0 1 4 4l-2 24a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4Z" fill="#F2C14E"/>
+  <path d="M2 20a4 4 0 0 1 4-4h52a4 4 0 0 1 4 4v1H2Z" fill="#F7D57A"/>
+</svg>`;
+const fileSVG = f => {
+  const t = ftype(f), e = EXT(f.name);
+  return `<svg class="file-ic" viewBox="0 0 48 60" aria-hidden="true">
+    <path d="M6 2h26l14 14v38a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4Z" fill="#F4F3F1"/>
+    <path d="M32 2v10a4 4 0 0 0 4 4h10Z" fill="#CFCFD4"/>
+    <path d="M10 26h24M10 32h28M10 38h20" stroke="#D5D5DA" stroke-width="2" stroke-linecap="round"/>
+    <rect x="2" y="42" width="${Math.max(24, e.length * 8 + 10)}" height="13" rx="2" fill="${t.c}"/>
+    <text x="7" y="52" font-family="ui-monospace,Menlo,monospace" font-size="9" font-weight="700" fill="#101012">${esc(e)}</text>
+  </svg>`;
+};
+
+/* tree helpers --------------------------------------------------------------- */
+const childFolders = pid => S.folders.filter(f => (f.parentId || null) === (pid || null)).sort((a, b) => a.name.localeCompare(b.name));
+const filesIn = fid => S.files.filter(f => (f.folderId || null) === (fid || null));
+function folderPath(id) {
+  const out = []; let f = folderById(id); const guard = new Set();
+  while (f && !guard.has(f.id)) { guard.add(f.id); out.unshift(f); f = folderById(f.parentId); }
+  return out;
+}
+function isInside(id, ancestor) {
+  let f = folderById(id); const guard = new Set();
+  while (f && !guard.has(f.id)) { if (f.id === ancestor) return true; guard.add(f.id); f = folderById(f.parentId); }
+  return false;
+}
+const folderCount = id => childFolders(id).length + filesIn(id).length;
+const latest = id => Math.max(folderById(id)?.created || 0, ...filesIn(id).map(f => f.added || 0));
+
+function sortItems(folders, files) {
+  const { key, dir } = S.fileSort;
+  const cmpName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  const fileCmp = {
+    name: cmpName,
+    date: (a, b) => (a.added || 0) - (b.added || 0),
+    size: (a, b) => (a.size || 0) - (b.size || 0),
+    type: (a, b) => ftype(a).label.localeCompare(ftype(b).label) || cmpName(a, b),
+  }[key];
+  const folderCmp = key === 'date' ? (a, b) => latest(a.id) - latest(b.id) : cmpName;
+  return {
+    folders: [...folders].sort((a, b) => folderCmp(a, b) * (key === 'name' || key === 'date' ? dir : 1)),
+    files: [...files].sort((a, b) => fileCmp(a, b) * dir),
+  };
+}
+
+function currentItems() {
+  const q = XP.q.trim().toLowerCase();
+  if (q) {
+    return sortItems(S.folders.filter(f => f.name.toLowerCase().includes(q)), S.files.filter(f => f.name.toLowerCase().includes(q)));
+  }
+  return sortItems(childFolders(S.folderId), filesIn(S.folderId));
 }
 
 function viewFiles() {
-  const sel = S.folderId;
-  const files = S.files
-    .filter(f => sel === null || (sel === '__unfiled' ? !f.folderId : f.folderId === sel))
-    .sort((a, b) => b.added - a.added);
-  const unfiled = S.files.filter(f => !f.folderId).length;
-  const target = sel && sel !== '__unfiled' ? folderName(sel) : 'Unfiled';
+  if (S.folderId && !folderById(S.folderId)) S.folderId = null;
+  const here = S.folderId;
+  const path = folderPath(here);
   const used = S.files.reduce((n, f) => n + (f.size || 0), 0);
+  const crumbs = [`<button class="xp-crumb" data-act="xp-go" data-id="">${icon('files')}<span>Files</span></button>`,
+    ...path.map(f => `<button class="xp-crumb" data-act="xp-go" data-id="${f.id}"><span>${esc(f.name)}</span></button>`)]
+    .join(`<span class="xp-sep" aria-hidden="true">${icon('right')}</span>`);
+  const sortLabel = { name: 'Name', date: 'Date', type: 'Type', size: 'Size' };
 
-  return `<div class="wrap">
-    <div class="sec-h">
-      <h2>Files</h2>
-      <p>${S.files.length} stored · ${size(used)}</p>
+  return `<div class="wrap wrap-wide">
+  <div class="xp ${MOBILE ? 'xp-phone' : ''}" id="xp">
+    <div class="xp-bar">
+      <div class="xp-navbtns">
+        <button class="icon-btn" data-act="xp-back" aria-label="Back" ${XP.back.length ? '' : 'disabled'}>${icon('left')}</button>
+        ${MOBILE ? '' : `<button class="icon-btn" data-act="xp-fwd" aria-label="Forward" ${XP.fwd.length ? '' : 'disabled'}>${icon('right')}</button>`}
+        <button class="icon-btn xp-up" data-act="xp-up" aria-label="Up one level" ${here ? '' : 'disabled'}>${icon('up')}</button>
+      </div>
+      <nav class="xp-addr" aria-label="Location">${crumbs}</nav>
+      <label class="xp-search">${icon('search')}<span class="vh">Search files</span>
+        <input type="search" id="xpSearch" data-act="xp-search" placeholder="Search Files" value="${esc(XP.q)}" autocomplete="off"></label>
+    </div>
+
+    <div class="xp-cmd">
+      <button class="btn btn-sm" data-act="new-folder">${icon('plus')}<span>New folder</span></button>
+      <label class="btn btn-sm btn-accent">${icon('up-tray')}<span>Upload</span><input type="file" id="picker" multiple hidden></label>
+      <span class="xp-cmd-sep" aria-hidden="true"></span>
+      <span class="xp-selcmds" id="xpSelCmds"></span>
       <span class="spacer"></span>
+      <label class="xp-sort"><span class="vh">Sort by</span>
+        <select data-act="xp-sort">${Object.entries(sortLabel).map(([k, l]) => `<option value="${k}" ${S.fileSort.key === k ? 'selected' : ''}>Sort: ${l}</option>`).join('')}</select></label>
+      <button class="icon-btn" data-act="xp-dir" aria-label="Reverse order" title="${S.fileSort.dir > 0 ? 'Ascending' : 'Descending'}">${icon(S.fileSort.dir > 0 ? 'up' : 'down')}</button>
       <div class="seg">
-        <button data-act="file-view" data-v="grid" aria-pressed="${S.fileView === 'grid'}" aria-label="Grid">${icon('grid')}</button>
-        <button data-act="file-view" data-v="list" aria-pressed="${S.fileView === 'list'}" aria-label="List">${icon('list')}</button>
+        <button data-act="file-view" data-v="icons" aria-pressed="${S.fileView === 'icons'}" aria-label="Large icons" title="Large icons">${icon('grid')}</button>
+        <button data-act="file-view" data-v="details" aria-pressed="${S.fileView === 'details'}" aria-label="Details" title="Details">${icon('list')}</button>
       </div>
     </div>
 
-    <div class="folder-rail">
-      <button class="folder" data-act="open-folder" data-id="" aria-current="${sel === null}">All files <span class="c">${S.files.length}</span></button>
-      ${S.folders.map(f => `<button class="folder" data-act="open-folder" data-id="${f.id}" aria-current="${sel === f.id}">
-        ${esc(f.name)} <span class="c">${S.files.filter(x => x.folderId === f.id).length}</span></button>`).join('')}
-      ${unfiled ? `<button class="folder" data-act="open-folder" data-id="__unfiled" aria-current="${sel === '__unfiled'}">Unfiled <span class="c">${unfiled}</span></button>` : ''}
-      <button class="folder" data-act="new-folder">${icon('plus')}New folder</button>
-      ${sel && sel !== '__unfiled' ? `
-        <button class="icon-btn" data-act="rename-folder" data-id="${sel}" aria-label="Rename folder">${icon('pencil')}</button>
-        <button class="icon-btn danger" data-act="del-folder" data-id="${sel}" aria-label="Delete folder">${icon('trash')}</button>` : ''}
+    <div class="xp-main">
+      ${MOBILE ? '' : `<nav class="xp-tree" aria-label="Folders">
+        <button class="xp-node ${here === null ? 'on' : ''}" data-act="xp-go" data-id="" data-drop="" style="--d:0">
+          ${folderSVG(false)}<span>Files</span><span class="c">${S.files.length}</span></button>
+        ${treeHTML(null, 1)}
+        <div class="xp-tree-foot">${icon('layers')}<span>${S.files.length} file${S.files.length === 1 ? '' : 's'} · ${size(used)}</span></div>
+      </nav>`}
+      <div class="xp-pane" id="xpPane" data-act="xp-blank" tabindex="-1">${paneHTML()}</div>
     </div>
 
-    <div class="drop" id="drop">
-      <span class="di">${icon('up-tray')}</span>
-      <b>Drop lecture files here</b>
-      <p class="hint">They land in <b>${esc(target)}</b>. PDFs, images and text open in the page; anything else is stored and downloads.</p>
-      <label class="btn">${icon('files')}Choose files<input type="file" id="picker" multiple hidden></label>
-    </div>
+    <div class="xp-status" id="xpStatus"></div>
+  </div></div>`;
+}
 
-    ${files.length
-      ? (S.fileView === 'grid'
-        ? `<div class="file-grid">${files.map(fileCard).join('')}</div>`
-        : `<div class="file-list">${files.map(fileRow).join('')}</div>`)
-      : `<p class="empty"><b>Nothing in ${esc(sel === null ? 'your files' : target)}</b>Drop a PDF or a slide deck above and it is yours offline.</p>`}
+function treeHTML(pid, depth) {
+  return childFolders(pid).map(f => {
+    const kids = childFolders(f.id).length;
+    const open = XP.open.has(f.id) || isInside(S.folderId, f.id);
+    return `<div class="xp-branch">
+      <button class="xp-node ${S.folderId === f.id ? 'on' : ''}" data-act="xp-go" data-id="${f.id}" data-drop="${f.id}" style="--d:${depth}">
+        ${kids ? `<span class="xp-tw ${open ? 'open' : ''}" data-act="xp-twist" data-id="${f.id}" role="button" aria-label="${open ? 'Collapse' : 'Expand'}">${icon('right')}</span>` : '<span class="xp-tw none"></span>'}
+        ${folderSVG(folderCount(f.id) > 0)}<span>${esc(f.name)}</span></button>
+      ${kids && open ? treeHTML(f.id, depth + 1) : ''}
+    </div>`;
+  }).join('');
+}
+
+function paneHTML() {
+  const { folders, files } = currentItems();
+  const searching = !!XP.q.trim();
+  if (!folders.length && !files.length) {
+    return `<div class="xp-empty">
+      ${folderSVG(false)}
+      <b>${searching ? 'No matches' : 'This folder is empty'}</b>
+      <p class="hint">${searching ? 'Nothing here has that in its name.' : (MOBILE ? 'Tap Upload to add lecture files.' : 'Drag files from your computer onto this window, or use Upload.')}</p>
+    </div>`;
+  }
+  const menuBtn = (kind, id) => `<button class="xp-more" data-act="xp-menu" data-kind="${kind}" data-id="${id}" aria-label="More actions">${icon('more')}</button>`;
+  const where = f => searching ? folderPath(f.folderId ?? f.parentId).map(x => x.name).join(' › ') || 'Files' : '';
+
+  if (S.fileView === 'details') {
+    const head = (k, l) => `<button class="xp-th" data-act="xp-sortby" data-k="${k}">${l}${S.fileSort.key === k ? `<span class="arr">${S.fileSort.dir > 0 ? '▲' : '▼'}</span>` : ''}</button>`;
+    return `<div class="xp-details" role="grid">
+      <div class="xp-row xp-head" role="row">${head('name', 'Name')}${head('date', 'Date modified')}${head('type', 'Type')}${head('size', 'Size')}<span></span></div>
+      ${folders.map(f => `<div class="xp-row xp-item ${XP.sel.has('d:' + f.id) ? 'sel' : ''}" role="row" draggable="true"
+          data-act="xp-item" data-kind="folder" data-id="${f.id}" data-drop="${f.id}" tabindex="0">
+        <span class="xp-nm">${folderSVG(folderCount(f.id) > 0)}<span>${esc(f.name)}${searching ? `<small>${esc(where({ parentId: f.parentId }))}</small>` : ''}</span></span>
+        <span>${esc(fmtDate(new Date(latest(f.id)), { day: '2-digit', month: 'short', year: 'numeric' }))}</span>
+        <span>File folder</span><span>${folderCount(f.id)} item${folderCount(f.id) === 1 ? '' : 's'}</span>${menuBtn('folder', f.id)}</div>`).join('')}
+      ${files.map(f => `<div class="xp-row xp-item ${XP.sel.has('f:' + f.id) ? 'sel' : ''}" role="row" draggable="true"
+          data-act="xp-item" data-kind="file" data-id="${f.id}" tabindex="0">
+        <span class="xp-nm"><span class="xp-mini" ${String(f.type).startsWith('image/') ? `data-thumb="${f.id}"` : ''}>${fileSVG(f)}</span><span>${esc(f.name)}${searching ? `<small>${esc(where(f))}</small>` : ''}</span></span>
+        <span>${esc(fmtDate(new Date(f.added || Date.now()), { day: '2-digit', month: 'short', year: 'numeric' }))}</span>
+        <span>${esc(ftype(f).label)}</span><span>${size(f.size)}</span>${menuBtn('file', f.id)}</div>`).join('')}
+    </div>`;
+  }
+
+  return `<div class="xp-icons">
+    ${folders.map(f => `<div class="xp-tile xp-item ${XP.sel.has('d:' + f.id) ? 'sel' : ''}" draggable="true"
+        data-act="xp-item" data-kind="folder" data-id="${f.id}" data-drop="${f.id}" tabindex="0" title="${esc(f.name)}">
+      <span class="xp-art">${folderSVG(folderCount(f.id) > 0)}</span>
+      <span class="xp-name">${esc(f.name)}</span>
+      <span class="xp-sub">${searching ? esc(where({ parentId: f.parentId })) : `${folderCount(f.id)} item${folderCount(f.id) === 1 ? '' : 's'}`}</span>
+      ${menuBtn('folder', f.id)}</div>`).join('')}
+    ${files.map(f => `<div class="xp-tile xp-item ${XP.sel.has('f:' + f.id) ? 'sel' : ''}" draggable="true"
+        data-act="xp-item" data-kind="file" data-id="${f.id}" tabindex="0" title="${esc(f.name)}">
+      <span class="xp-art ${String(f.type).startsWith('image/') ? 'is-img' : ''}" ${String(f.type).startsWith('image/') ? `data-thumb="${f.id}"` : ''}>${fileSVG(f)}</span>
+      <span class="xp-name">${esc(f.name)}</span>
+      <span class="xp-sub">${searching ? esc(where(f)) : size(f.size)}</span>
+      ${menuBtn('file', f.id)}</div>`).join('')}
   </div>`;
 }
 
-function fileCard(f) {
-  const t = ftype(f);
-  const isImg = String(f.type).startsWith('image/');
-  return `<article class="file-card">
-    <button class="thumb" style="--fc:${t.c}" data-act="open-file" data-id="${f.id}" ${isImg ? `data-thumb="${f.id}"` : ''} aria-label="Open ${esc(f.name)}">
-      ${icon(t.ic)}<span class="ext">${esc(EXT(f.name))}</span>
-    </button>
-    <div class="file-bd"><b title="${esc(f.name)}">${esc(f.name)}</b><span>${size(f.size)} · ${esc(fmtDate(new Date(f.added), { day: '2-digit', month: 'short' }))}</span></div>
-    <div class="file-acts">
-      <button class="icon-btn" data-act="open-file" data-id="${f.id}" aria-label="Open">${icon('eye')}</button>
-      <button class="icon-btn" data-act="dl-file" data-id="${f.id}" aria-label="Download">${icon('down-tray')}</button>
-      <button class="icon-btn" data-act="rename-file" data-id="${f.id}" aria-label="Rename">${icon('pencil')}</button>
-      <span class="spacer"></span>
-      <button class="icon-btn danger" data-act="del-file" data-id="${f.id}" aria-label="Delete">${icon('trash')}</button>
-    </div>
-  </article>`;
+/** Selection only changes classes — re-rendering here would break double-click. */
+function xpSelectionUI() {
+  $$('#xpPane .xp-item').forEach(el => el.classList.toggle('sel', XP.sel.has((el.dataset.kind === 'folder' ? 'd:' : 'f:') + el.dataset.id)));
+  const { folders, files } = currentItems();
+  const n = XP.sel.size;
+  const status = $('#xpStatus');
+  if (status) {
+    const selBytes = [...XP.sel].filter(k => k.startsWith('f:')).reduce((t, k) => t + (S.files.find(f => f.id === k.slice(2))?.size || 0), 0);
+    status.textContent = `${folders.length + files.length} item${folders.length + files.length === 1 ? '' : 's'}`
+      + (n ? `   ·   ${n} selected${selBytes ? ' · ' + size(selBytes) : ''}` : '')
+      + (XP.q.trim() ? '   ·   search results' : '');
+  }
+  const cmds = $('#xpSelCmds');
+  if (cmds) {
+    const one = n === 1 ? [...XP.sel][0] : null;
+    cmds.innerHTML = n ? `
+      ${one ? `<button class="btn btn-sm btn-ghost" data-act="xp-open">${icon('eye')}<span>Open</span></button>` : ''}
+      ${[...XP.sel].some(k => k.startsWith('f:')) ? `<button class="btn btn-sm btn-ghost" data-act="xp-download">${icon('down-tray')}<span>Download</span></button>` : ''}
+      ${one ? `<button class="btn btn-sm btn-ghost" data-act="xp-rename">${icon('pencil')}<span>Rename</span></button>` : ''}
+      <button class="btn btn-sm btn-ghost" data-act="xp-move">${icon('files')}<span>Move</span></button>
+      <button class="btn btn-sm btn-ghost btn-danger" data-act="xp-delete">${icon('trash')}<span>Delete</span></button>` : '';
+  }
 }
 
-function fileRow(f) {
-  const t = ftype(f);
-  return `<div class="file-row">
-    <button class="sq" style="--fc:${t.c}" data-act="open-file" data-id="${f.id}" aria-label="Open ${esc(f.name)}" ${String(f.type).startsWith('image/') ? `data-thumb="${f.id}"` : ''}>${icon(t.ic)}</button>
-    <div style="min-width:0"><b>${esc(f.name)}</b><span class="meta">${size(f.size)} · ${esc(folderName(f.folderId))}</span></div>
-    <label class="vh" for="mv-${f.id}">Folder for ${esc(f.name)}</label>
-    <select id="mv-${f.id}" data-act="move-file" data-id="${f.id}" style="width:auto;min-width:130px">
-      <option value="" ${!f.folderId ? 'selected' : ''}>Unfiled</option>
-      ${S.folders.map(x => `<option value="${x.id}" ${f.folderId === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
-    </select>
-    <span style="display:flex;gap:1px">
-      <button class="icon-btn" data-act="dl-file" data-id="${f.id}" aria-label="Download">${icon('down-tray')}</button>
-      <button class="icon-btn danger" data-act="del-file" data-id="${f.id}" aria-label="Delete">${icon('trash')}</button>
-    </span>
-  </div>`;
+function refreshPane() {
+  const pane = $('#xpPane');
+  if (!pane) return;
+  pane.innerHTML = paneHTML();
+  xpSelectionUI();
+  wireThumbs();
+}
+
+function xpNavigate(id, push = true) {
+  id = id || null;
+  if (push && id !== S.folderId) { XP.back.push(S.folderId); XP.fwd = []; }
+  XP.sel.clear(); XP.q = '';
+  commit(s => { s.folderId = id; });
+}
+
+function xpOpenItem(kind, id) {
+  if (kind === 'folder') return xpNavigate(id);
+  openLightbox(id);
+}
+
+/* context menu ---------------------------------------------------------------- */
+function showMenu(x, y, items) {
+  closeMenu();
+  const m = document.createElement('div');
+  m.className = 'ctx'; m.id = 'ctx'; m.setAttribute('role', 'menu');
+  m.innerHTML = items.map(it => it === '-' ? '<span class="ctx-sep"></span>'
+    : `<button role="menuitem" class="${it.danger ? 'danger' : ''}" data-act="${it.act}">${icon(it.ic)}<span>${esc(it.label)}</span></button>`).join('');
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = `${clamp(x, 8, innerWidth - r.width - 8)}px`;
+  m.style.top = `${clamp(y, 8, innerHeight - r.height - 8)}px`;
+  m.querySelector('button')?.focus({ preventScroll: true });
+}
+function closeMenu() { $('#ctx')?.remove(); }
+
+function itemMenu(x, y) {
+  const n = XP.sel.size, one = n === 1 ? [...XP.sel][0] : null;
+  const hasFile = [...XP.sel].some(k => k.startsWith('f:'));
+  showMenu(x, y, [
+    ...(one ? [{ act: 'xp-open', ic: one.startsWith('d:') ? 'files' : 'eye', label: 'Open' }] : []),
+    ...(hasFile ? [{ act: 'xp-download', ic: 'down-tray', label: n > 1 ? `Download ${n} items` : 'Download' }] : []),
+    '-',
+    ...(one ? [{ act: 'xp-rename', ic: 'pencil', label: 'Rename' }] : []),
+    { act: 'xp-move', ic: 'files', label: 'Move to…' },
+    '-',
+    { act: 'xp-delete', ic: 'trash', label: n > 1 ? `Delete ${n} items` : 'Delete', danger: true },
+  ]);
+}
+function blankMenu(x, y) {
+  showMenu(x, y, [
+    { act: 'new-folder', ic: 'plus', label: 'New folder' },
+    { act: 'upload', ic: 'up-tray', label: 'Upload files…' },
+    '-',
+    { act: 'xp-view-icons', ic: 'grid', label: 'Large icons' },
+    { act: 'xp-view-details', ic: 'list', label: 'Details' },
+  ]);
+}
+
+function folderOptions(sel, exclude = []) {
+  const out = [`<option value="" ${!sel ? 'selected' : ''}>Files (top level)</option>`];
+  const walk = (pid, depth) => childFolders(pid).forEach(f => {
+    if (exclude.some(x => f.id === x || isInside(f.id, x))) return;
+    out.push(`<option value="${f.id}" ${sel === f.id ? 'selected' : ''}>${' '.repeat(depth)}${esc(f.name)}</option>`);
+    walk(f.id, depth + 1);
+  });
+  walk(null, 1);
+  return out.join('');
+}
+
+/** Move selected keys ('f:id' / 'd:id') into a folder. */
+function moveItems(keys, target) {
+  target = target || null;
+  let moved = 0, refused = 0;
+  commit(s => {
+    keys.forEach(k => {
+      const id = k.slice(2);
+      if (k.startsWith('f:')) {
+        const f = s.files.find(x => x.id === id);
+        if (f && (f.folderId || null) !== target) { f.folderId = target; moved++; }
+      } else {
+        const f = s.folders.find(x => x.id === id);
+        if (!f) return;
+        if (target && (target === id || isInside(target, id))) { refused++; return; }
+        if ((f.parentId || null) !== target) { f.parentId = target; moved++; }
+      }
+    });
+  });
+  if (refused) toast('A folder cannot go inside itself.');
+  else if (moved) toast(`Moved ${moved} item${moved > 1 ? 's' : ''} to ${target ? folderName(target) : 'Files'}`);
+}
+
+async function deleteItems(keys) {
+  const files = keys.filter(k => k.startsWith('f:')).map(k => k.slice(2));
+  const folders = keys.filter(k => k.startsWith('d:')).map(k => k.slice(2));
+  const msg = folders.length
+    ? `Delete ${keys.length === 1 ? 'this folder' : `${keys.length} items`}? Anything inside ${folders.length > 1 || files.length ? 'the folders' : 'it'} moves up one level — only the folder${folders.length > 1 ? 's go' : ' goes'}.${files.length ? ` ${files.length} file${files.length > 1 ? 's are' : ' is'} deleted for good.` : ''}`
+    : `Delete ${files.length === 1 ? 'this file' : `${files.length} files`}? ${files.length === 1 ? 'It is' : 'They are'} also removed from any note ${files.length === 1 ? 'it is' : 'they are'} attached to.`;
+  if (!confirm(msg)) return;
+  await Promise.all(files.map(id => blobs.del(id)));
+  commit(s => {
+    folders.forEach(id => {
+      const f = s.folders.find(x => x.id === id);
+      if (!f) return;
+      s.folders.forEach(x => { if (x.parentId === id) x.parentId = f.parentId || null; });
+      s.files.forEach(x => { if (x.folderId === id) x.folderId = f.parentId || null; });
+      if (s.folderId === id || isInside(s.folderId, id)) s.folderId = f.parentId || null;
+    });
+    s.folders = s.folders.filter(x => !folders.includes(x.id));
+    s.files = s.files.filter(f => !files.includes(f.id));
+    s.notes.forEach(n => { n.files = n.files.filter(x => !files.includes(x)); });
+    s.certs.forEach(c => { if (files.includes(c.fileId)) c.fileId = null; });
+  });
+  XP.sel.clear();
+  xpSelectionUI();
+  toast(keys.length > 1 ? `${keys.length} items deleted` : folders.length ? 'Folder deleted' : 'File deleted');
 }
 
 /* =============================================================================
@@ -1350,6 +1944,7 @@ function viewCertificates() {
   </div>`;
 }
 
+
 /* =============================================================================
    10 — view: settings
    ============================================================================= */
@@ -1358,7 +1953,9 @@ function viewSettings() {
   const used = S.files.reduce((n, f) => n + (f.size || 0), 0);
 
   return `<div class="wrap">
-    <div class="sec-h"><h2>Settings</h2><p>Everything here is stored in this browser only</p></div>
+    <div class="sec-h"><h2>Settings</h2><p>${SYNC.cfg ? 'Synced across your devices' : 'Stored in this browser until you turn on sync'}</p></div>
+
+    ${syncPanelHTML()}
 
     <div class="set-grid">
       <section class="panel">
@@ -1418,7 +2015,7 @@ function viewSettings() {
 
       <section class="panel">
         <div class="panel-h">${icon('down-tray')}<h3>Your copy of everything</h3></div>
-        <p class="hint" style="margin-bottom:14px">Notes, timetable, tasks and certificates live in localStorage; uploaded files live in IndexedDB. Both are tied to this browser on this device. Export before clearing browser data or changing machines — the backup holds everything except the uploaded files themselves.</p>
+        <p class="hint" style="margin-bottom:14px">A single file with your notes, timetable, tasks, certificates and the uploaded files themselves. Restore it on any device to pick up exactly where you left off.</p>
         <div class="row">
           <button class="btn" data-act="export">${icon('down-tray')}Export a backup</button>
           <label class="btn">${icon('up-tray')}Restore a backup<input type="file" id="importer" accept="application/json" hidden></label>
@@ -1429,7 +2026,7 @@ function viewSettings() {
           <button class="btn btn-sm" data-act="view" data-view="files">Manage</button>
         </div>
         <div class="set-row">
-          <div class="bd"><b>Erase everything</b><span>Notes, timetable, tasks, files. No undo.</span></div>
+          <div class="bd"><b>Erase this device</b><span>Notes, timetable, tasks, files in this browser. No undo.${SYNC.cfg ? ' Sync is switched off first, so your cloud copy is kept.' : ''}</span></div>
           <button class="btn btn-sm btn-danger" data-act="wipe">${icon('trash')}Erase</button>
         </div>
       </section>
@@ -1454,21 +2051,24 @@ const TABS = ['home', 'notes', 'timetable', 'tasks'];
 const VIEWS = { home: viewHome, notes: viewNotes, timetable: viewTimetable, tasks: viewTasks, files: viewFiles, certificates: viewCertificates, settings: viewSettings };
 const TITLES = { home: 'Home', notes: 'Notes', timetable: 'Timetable', tasks: 'Tasks', files: 'Files', certificates: 'Certificates', settings: 'Settings' };
 const PRIMARY = {
-  home: ['new-note', 'New note'], notes: ['new-note', 'New note'], timetable: ['new-entry', 'Add entry'],
+  home: ['new-note', 'New note'], notes: ['new-note', 'New notebook'], timetable: ['new-entry', 'Add entry'],
   tasks: ['new-task', 'New task'], files: ['upload', 'Upload'], certificates: ['new-cert', 'Add certificate'],
   settings: ['export', 'Back up'],
 };
 
+/* Phone and desktop are two different layouts, chosen by screen width. */
 const mq = window.matchMedia('(max-width: 760px)');
 let MOBILE = mq.matches;
+const TOUCH = window.matchMedia('(hover: none)').matches;
 
 function renderChrome() {
   const late = openTasks().filter(t => urgency(t.date) === 'late').length;
   const dueToday = openTasks().filter(t => t.date <= todayISO()).length;
 
-  $('#app').classList.toggle('rail-open', S.railOpen);
-  $('.rail-expand')?.setAttribute('aria-expanded', String(S.railOpen));
+  $('#app').classList.toggle('rail-open', !!S.railOpen);
+  $('.rail-expand')?.setAttribute('aria-expanded', String(!!S.railOpen));
   document.body.dataset.view = S.view;
+  document.body.classList.toggle('is-phone', MOBILE);
 
   $('#railList').innerHTML = NAV.map(n => `<li><button class="rail-btn" data-act="view" data-view="${n.v}"
     aria-current="${n.v === S.view ? 'page' : 'false'}" title="${n.label}">
@@ -1482,7 +2082,7 @@ function renderChrome() {
   }).join('') + `<button class="tab" data-act="more" aria-current="${['files', 'certificates', 'settings'].includes(S.view) ? 'page' : 'false'}">
       ${icon('more')}<span>More</span></button>`;
 
-  $('#crumb').innerHTML = TITLES[S.view] || 'Studyframe';
+  $('#crumb').textContent = TITLES[S.view] || 'Studyframe';
 
   const sel = $('#subjectSel');
   sel.innerHTML = S.subjects.map(s =>
@@ -1493,34 +2093,55 @@ function renderChrome() {
 
   const [, label] = PRIMARY[S.view] || PRIMARY.home;
   $('#primaryLabel').textContent = label;
+  $('#primaryBtn')?.setAttribute('aria-label', label);
+  syncBadge();
 }
 
 let lastView = null;
 function render() {
+  const was = MOBILE;
   MOBILE = mq.matches;
+  if (was !== MOBILE) BOOK.w = 0;
+  closeMenu();
   renderChrome();
   const main = $('#main');
   const changed = S.view !== lastView;
+  const keep = main.scrollTop;
   lastView = S.view;
   main.classList.remove('enter');
   main.innerHTML = (VIEWS[S.view] || viewHome)();
-  if (changed) main.scrollTop = 0;
-  void main.offsetWidth;
-  main.classList.add('enter');
+  if (changed) {
+    main.scrollTop = 0;
+    void main.offsetWidth;
+    main.classList.add('enter');
+  } else main.scrollTop = keep;
 
   if (S.view === 'notes') wireEditor();
-  if (S.view === 'files') { wireFiles(); wireThumbs(); }
+  if (S.view === 'files') { wireFiles(); wireThumbs(); xpSelectionUI(); }
   if (S.view === 'certificates') wireThumbs();
   if (S.view === 'settings') wireImporter();
-  if (S.view === 'timetable') requestAnimationFrame(fitTimetable);
+  if (S.view === 'timetable') { fitTimetable(); requestAnimationFrame(fitTimetable); }
   uiTick();
 }
+
+/** Re-render unless the person is typing somewhere; then wait until they stop. */
+let renderPending = false;
+function renderSafely() {
+  const a = document.activeElement;
+  const typing = a && (a.isContentEditable || (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && $('#main').contains(a)));
+  if (typing || !$('#sheet').hidden) { renderPending = true; return; }
+  renderPending = false;
+  render();
+}
+document.addEventListener('focusout', () => setTimeout(() => {
+  if (renderPending && !(document.activeElement && (document.activeElement.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)))) renderSafely();
+}, 200));
 
 /* =============================================================================
    11 — file store: upload, thumbnails, preview, download
    ============================================================================= */
 async function addFiles(list) {
-  const folderId = S.folderId && S.folderId !== '__unfiled' ? S.folderId : null;
+  const folderId = S.folderId && folderById(S.folderId) ? S.folderId : null;
   let added = 0;
   for (const f of list) {
     if (f.size > 120 * 1048576) { toast(`${f.name} is over 120 MB — too big for browser storage.`); continue; }
@@ -1533,20 +2154,39 @@ async function addFiles(list) {
   }
   if (added) {
     commit(() => {});
-    toast(`${added} file${added > 1 ? 's' : ''} stored in ${folderId ? folderName(folderId) : 'Unfiled'}`);
+    toast(`${added} file${added > 1 ? 's' : ''} added to ${folderId ? folderName(folderId) : 'Files'}`);
   }
 }
 
+/** A stored file: this device first, then the cloud copy if sync is on. */
+async function blobGet(id) {
+  let blob = null;
+  try { blob = await blobs.get(id); } catch (e) { /* not here */ }
+  if (blob) return blob;
+  if (SYNC.cfg && S.files.some(f => f.id === id)) {
+    try {
+      blob = await ghGetFile(id);
+      if (blob) await blobs.put(id, blob);
+    } catch (e) { blob = null; }
+  }
+  return blob;
+}
+
 function wireFiles() {
-  const drop = $('#drop'), picker = $('#picker');
-  if (!drop || !picker) return;
-  picker.onchange = () => { if (picker.files.length) addFiles([...picker.files]); };
-  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
-  ['dragleave', 'dragend'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('over')));
-  drop.addEventListener('drop', e => {
-    e.preventDefault(); drop.classList.remove('over');
+  const picker = $('#picker'), xp = $('#xp');
+  if (!picker || !xp) return;
+  picker.onchange = () => { if (picker.files.length) addFiles([...picker.files]); picker.value = ''; };
+  const hasOSFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+  xp.addEventListener('dragover', e => { if (hasOSFiles(e)) { e.preventDefault(); xp.classList.add('over'); } });
+  xp.addEventListener('dragleave', e => { if (!xp.contains(e.relatedTarget)) xp.classList.remove('over'); });
+  xp.addEventListener('drop', e => {
+    xp.classList.remove('over');
+    if (!hasOSFiles(e)) return;
+    e.preventDefault();
     if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]);
   });
+  const search = $('#xpSearch');
+  if (search) search.addEventListener('input', () => { XP.q = search.value; XP.sel.clear(); refreshPane(); });
 }
 
 let thumbURLs = [];
@@ -1555,13 +2195,13 @@ async function wireThumbs() {
   thumbURLs = [];
   for (const el of $$('[data-thumb]')) {
     try {
-      const blob = await blobs.get(el.dataset.thumb);
-      if (!blob) continue;
+      const blob = await blobGet(el.dataset.thumb);
+      if (!blob || !el.isConnected) continue;
       const u = URL.createObjectURL(blob);
       thumbURLs.push(u);
       const img = new Image();
-      img.src = u; img.alt = '';
-      img.onload = () => { el.innerHTML = ''; el.appendChild(img); };
+      img.src = u; img.alt = ''; img.draggable = false;
+      img.onload = () => { el.innerHTML = ''; el.appendChild(img); el.classList.add('has-img'); };
     } catch (e) { /* leave the placeholder */ }
   }
 }
@@ -1576,15 +2216,18 @@ async function openLightbox(id) {
   body.innerHTML = '<p class="hint">Opening…</p>';
   box.hidden = false;
 
-  let blob;
-  try { blob = await blobs.get(id); } catch (e) { /* handled below */ }
-  if (!blob) { body.innerHTML = '<p class="empty"><b>The stored copy is missing</b>Upload this file again.</p>'; return; }
+  const blob = await blobGet(id);
+  if (lbFile !== f) return;
+  if (!blob) {
+    body.innerHTML = `<p class="empty"><b>This file is not on this device</b>${SYNC.cfg ? 'It has not reached the cloud copy yet — open it on the device you added it from, then sync.' : 'Turn on sync in Settings, or upload it again here.'}</p>`;
+    return;
+  }
   if (lbURL) URL.revokeObjectURL(lbURL);
   lbURL = URL.createObjectURL(blob);
-
-  if (String(f.type).startsWith('image/')) body.innerHTML = `<img src="${lbURL}" alt="${esc(f.name)}">`;
-  else if (f.type === 'application/pdf') body.innerHTML = `<iframe src="${lbURL}" title="${esc(f.name)}"></iframe>`;
-  else if (String(f.type).startsWith('text/')) body.innerHTML = `<pre>${esc((await blob.text()).slice(0, 200000))}</pre>`;
+  const type = f.type || blob.type || '';
+  if (type.startsWith('image/')) body.innerHTML = `<img src="${lbURL}" alt="${esc(f.name)}">`;
+  else if (type === 'application/pdf') body.innerHTML = `<iframe src="${lbURL}" title="${esc(f.name)}"></iframe>`;
+  else if (type.startsWith('text/')) body.innerHTML = `<pre>${esc((await blob.text()).slice(0, 200000))}</pre>`;
   else body.innerHTML = `<p class="empty"><b>${esc(EXT(f.name))} files do not open in a browser</b>Download it and open it in its own app.</p>`;
 }
 function closeLightbox() {
@@ -1596,12 +2239,12 @@ function closeLightbox() {
 async function download(id) {
   const f = S.files.find(x => x.id === id);
   if (!f) return;
-  let blob;
-  try { blob = await blobs.get(id); } catch (e) { /* handled below */ }
-  if (!blob) return toast('The stored copy is missing.');
+  const blob = await blobGet(id);
+  if (!blob) return toast('This file is not on this device yet.');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = f.name; a.click();
+  a.href = url; a.download = f.name;
+  document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
@@ -1961,31 +2604,56 @@ function highlightPalette() {
 }
 
 /* ---------- backup ---------- */
-function exportBackup() {
+/* One JSON file with everything, uploaded files included (as base64). */
+async function exportBackup() {
+  toast('Preparing backup…');
   const copy = JSON.parse(JSON.stringify(S));
   delete copy.fired;
-  const blob = new Blob([JSON.stringify(copy, null, 2)], { type: 'application/json' });
+  copy._blobs = {};
+  let missing = 0;
+  for (const f of S.files) {
+    const b = await blobGet(f.id);
+    if (b) copy._blobs[f.id] = await blob64(b);
+    else missing++;
+  }
+  const blob = new Blob([JSON.stringify(copy)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = `studyframe-backup-${todayISO()}.json`; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-  toast('Backup downloaded');
+  a.href = url; a.download = `studyframe-backup-${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 8000);
+  toast(missing ? `Backup downloaded — ${missing} file${missing > 1 ? 's were' : ' was'} not on this device` : 'Backup downloaded');
 }
 function wireImporter() {
   const inp = $('#importer');
   if (!inp) return;
   inp.onchange = async () => {
     const f = inp.files[0];
+    inp.value = '';
     if (!f) return;
     try {
       const data = JSON.parse(await f.text());
       if (!Array.isArray(data.subjects)) throw new Error('not a Studyframe backup');
-      if (!confirm('Restoring replaces the notes, timetable and tasks in this browser. Continue?')) return;
+      if (!confirm('Restoring replaces the notes, timetable, tasks and files on this device. Continue?')) return;
+      const stored = data._blobs || {};
+      delete data._blobs;
+      for (const [id, b64] of Object.entries(stored)) {
+        const meta = (data.files || []).find(x => x.id === id);
+        const bin = atob(b64), bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await blobs.put(id, new Blob([bytes], { type: meta?.type || '' }));
+      }
+      const before = S;
       data.fired = {};
       S = upgrade(data);
       S.notes.forEach(n => { n.html = cleanHTML(n.html); });
+      // a restore is a deliberate edit: mark every record as new so sync spreads it
+      SNAP = new Map(); SNAP_SETTINGS = '';
+      before.subjects && SYNCED.forEach(k => (before[k] || []).forEach(r => { if (!S[k].some(x => x.id === r.id)) S.deleted[r.id] = Date.now(); }));
+      stamp();
       save();
       render();
+      schedulePush();
       toast('Backup restored');
     } catch (err) { toast('That file is not a Studyframe backup.'); }
   };
@@ -2006,22 +2674,70 @@ const actions = {
 
   primary: () => {
     const [act] = PRIMARY[S.view] || PRIMARY.home;
-    if (act === 'upload') { const p = $('#picker'); if (p) return p.click(); return commit(s => { s.view = 'files'; }); }
     actions[act]?.(null, { dataset: { date: S.ttDate } });
   },
+  upload: () => {
+    closeMenu();
+    const p = $('#picker');
+    if (p) return p.click();
+    commit(s => { s.view = 'files'; });
+    setTimeout(() => $('#picker')?.click(), 60);
+  },
+  'sync-badge': () => {
+    if (!SYNC.cfg) return commit(s => { s.view = 'settings'; });
+    syncNow({ manual: true });
+  },
+  'sync-now': () => syncNow({ manual: true }),
+  'sync-off': () => {
+    if (!confirm('Stop syncing this device? Your data stays here and in the cloud copy.')) return;
+    disconnectSync(); render(); toast('Sync is off on this device');
+  },
+  'sync-code': async () => {
+    const code = setupCode();
+    try { await navigator.clipboard.writeText(code); toast('Setup code copied — paste it into Settings on your other device'); }
+    catch (e) {
+      openSheet(`<h3>Setup code</h3><p class="hint" style="margin-bottom:12px">Copy this and paste it into Settings → Sync on your other device. It contains your access token, so only paste it into your own devices.</p>
+        <textarea rows="4" readonly onclick="this.select()">${esc(code)}</textarea>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-act="close-sheet">Done</button></div>`);
+    }
+  },
+  'sync-choice': (_, el) => { const f = SYNC.pendingFinish; SYNC.pendingFinish = null; if (f) f(el.dataset.mode); },
 
   /* notes ------------------------------------------------------------------ */
   'new-note': () => {
+    closeSheet();
     commit(s => {
       const n = { id: uid(), subjectId: s.activeSubject, title: '', html: '', files: [], updated: Date.now(), created: Date.now() };
       s.notes.push(n); s.noteId = n.id; s.view = 'notes';
     });
-    setTimeout(() => $('#noteTitle')?.focus(), 60);
+    setTimeout(() => $('#noteTitle')?.focus(), 80);
   },
   'open-note': (_, el) => {
     const n = S.notes.find(x => x.id === el.dataset.id);
+    if (n && n.id === S.noteId && S.view === 'notes') return;
     commit(s => { if (n) s.activeSubject = n.subjectId; s.noteId = el.dataset.id; s.view = 'notes'; });
   },
+  'open-book': () => {
+    const closed = $('#closedBook');
+    const go = () => {
+      BOOK.open = true;
+      render();
+      const body = $('#paperBody');
+      if (body && !MOBILE && !body.textContent.trim()) { body.focus({ preventScroll: true }); }
+    };
+    if (!closed || reducedMotion()) return go();
+    closed.classList.add('opening');
+    setTimeout(go, 560);
+  },
+  'close-book': () => {
+    const body = $('#paperBody');
+    if (body) commit(s => { const n = s.notes.find(x => x.id === s.noteId); if (n) { n.html = cleanHTML(body.innerHTML); } }, { quiet: true });
+    MARK.set(BOOK.id, BOOK.spread);
+    BOOK.open = false;
+    render();
+  },
+  'page-prev': () => turnTo(BOOK.spread - 1, { placeCaret: true }),
+  'page-next': () => turnTo(BOOK.spread + 1, { placeCaret: true }),
   'del-note': (_, el) => {
     if (!confirm('Delete this note? It cannot be recovered.')) return;
     commit(s => { s.notes = s.notes.filter(n => n.id !== el.dataset.id); s.noteId = null; });
@@ -2102,7 +2818,6 @@ const actions = {
 
   /* timetable -------------------------------------------------------------- */
   mode: (_, el) => commit(s => { s.ttMode = el.dataset.mode; }),
-  density: (_, el) => commit(s => { s.ttDensity = el.dataset.d; }),
   shift: (_, el) => commit(s => { s.ttDate = iso(addDays(parseISO(s.ttDate), Number(el.dataset.n))); }),
   today: () => commit(s => { s.ttDate = todayISO(); }),
   'goto-day': (_, el) => commit(s => { s.ttMode = 'day'; s.ttDate = el.dataset.date; s.view = 'timetable'; }),
@@ -2136,41 +2851,101 @@ const actions = {
 
   /* files ------------------------------------------------------------------ */
   'file-view': (_, el) => commit(s => { s.fileView = el.dataset.v; }),
-  'new-folder': () => openSheet(textSheet({ title: 'New folder', label: 'Folder name', placeholder: 'Week 1–6 slides', form: 'new-folder', submit: 'Create folder' })),
-  'open-folder': (_, el) => commit(s => { s.folderId = el.dataset.id ? el.dataset.id : null; }),
-  'rename-folder': (_, el) => {
-    const f = S.folders.find(x => x.id === el.dataset.id);
-    if (f) openSheet(textSheet({ title: 'Rename folder', label: 'Folder name', value: f.name, form: 'rename-folder', id: f.id }));
+  'xp-view-icons': () => { closeMenu(); commit(s => { s.fileView = 'icons'; }); },
+  'xp-view-details': () => { closeMenu(); commit(s => { s.fileView = 'details'; }); },
+  'xp-dir': () => commit(s => { s.fileSort = { ...s.fileSort, dir: -s.fileSort.dir }; }),
+  'xp-sortby': (_, el) => commit(s => {
+    const k = el.dataset.k;
+    s.fileSort = s.fileSort.key === k ? { key: k, dir: -s.fileSort.dir } : { key: k, dir: 1 };
+  }),
+  'new-folder': () => {
+    closeMenu();
+    openSheet(textSheet({ title: 'New folder', label: 'Folder name', placeholder: 'Week 1–6 slides', form: 'new-folder', submit: 'Create folder',
+      extra: `<p class="hint" style="margin-top:8px">Created inside ${esc(S.folderId ? folderName(S.folderId) : 'Files')}.</p>` }));
   },
-  'del-folder': (_, el) => {
+  'xp-go': (_, el) => xpNavigate(el.dataset.id || null),
+  'xp-up': () => xpNavigate(folderById(S.folderId)?.parentId || null),
+  'xp-back': () => {
+    if (!XP.back.length) return;
+    XP.fwd.push(S.folderId);
+    xpNavigate(XP.back.pop(), false);
+  },
+  'xp-fwd': () => {
+    if (!XP.fwd.length) return;
+    XP.back.push(S.folderId);
+    xpNavigate(XP.fwd.pop(), false);
+  },
+  'xp-twist': (_, el) => {
     const id = el.dataset.id;
-    const n = S.files.filter(f => f.folderId === id).length;
-    if (!confirm(n ? `Delete this folder? Its ${n} file${n > 1 ? 's' : ''} move to Unfiled — nothing is lost.` : 'Delete this folder?')) return;
-    commit(s => {
-      s.folders = s.folders.filter(f => f.id !== id);
-      s.files.forEach(f => { if (f.folderId === id) f.folderId = null; });
-      s.folderId = null;
-    });
-    toast('Folder deleted');
+    if (XP.open.has(id) || isInside(S.folderId, id)) {
+      XP.open.delete(id);
+      if (isInside(S.folderId, id)) return xpNavigate(id);
+    } else XP.open.add(id);
+    render();
   },
+  'xp-blank': () => { if (XP.sel.size) { XP.sel.clear(); xpSelectionUI(); } },
+  'xp-item': (e, el) => {
+    const key = (el.dataset.kind === 'folder' ? 'd:' : 'f:') + el.dataset.id;
+    if (TOUCH && !(e && (e.ctrlKey || e.metaKey || e.shiftKey))) return xpOpenItem(el.dataset.kind, el.dataset.id);
+    if (e && (e.ctrlKey || e.metaKey)) { XP.sel.has(key) ? XP.sel.delete(key) : XP.sel.add(key); }
+    else if (e && e.shiftKey && XP.anchor) {
+      const keys = $$('#xpPane .xp-item').map(x => (x.dataset.kind === 'folder' ? 'd:' : 'f:') + x.dataset.id);
+      const a = keys.indexOf(XP.anchor), b = keys.indexOf(key);
+      if (a >= 0 && b >= 0) { XP.sel = new Set(keys.slice(Math.min(a, b), Math.max(a, b) + 1)); }
+    } else { XP.sel = new Set([key]); }
+    if (!e?.shiftKey) XP.anchor = key;
+    xpSelectionUI();
+  },
+  'xp-menu': (_, el) => {
+    const key = (el.dataset.kind === 'folder' ? 'd:' : 'f:') + el.dataset.id;
+    if (!XP.sel.has(key)) { XP.sel = new Set([key]); xpSelectionUI(); }
+    const r = el.getBoundingClientRect();
+    itemMenu(r.left - 160, r.bottom + 4);
+  },
+  'xp-open': () => {
+    closeMenu();
+    const k = [...XP.sel][0];
+    if (k) xpOpenItem(k.startsWith('d:') ? 'folder' : 'file', k.slice(2));
+  },
+  'xp-download': async () => {
+    closeMenu();
+    const ids = [...XP.sel].filter(k => k.startsWith('f:')).map(k => k.slice(2));
+    for (const id of ids) { await download(id); await new Promise(r => setTimeout(r, 250)); }
+  },
+  'xp-rename': () => {
+    closeMenu();
+    const k = [...XP.sel][0];
+    if (!k) return;
+    const id = k.slice(2);
+    if (k.startsWith('d:')) {
+      const f = folderById(id);
+      if (f) openSheet(textSheet({ title: 'Rename folder', label: 'Folder name', value: f.name, form: 'rename-folder', id: f.id }));
+    } else {
+      const f = S.files.find(x => x.id === id);
+      if (f) openSheet(textSheet({ title: 'Rename file', label: 'File name', value: f.name, form: 'rename-file', id: f.id }));
+    }
+  },
+  'xp-move': () => {
+    closeMenu();
+    const keys = [...XP.sel];
+    if (!keys.length) return;
+    const exclude = keys.filter(k => k.startsWith('d:')).map(k => k.slice(2));
+    openSheet(`<h3>Move ${keys.length === 1 ? 'this item' : `${keys.length} items`}</h3>
+      <form data-form="move-items">
+        <div class="field"><span>Move to</span><select name="target">${folderOptions(S.folderId, exclude)}</select></div>
+        <div class="form-actions"><span class="spacer"></span>
+          <button type="button" class="btn" data-act="close-sheet">Cancel</button>
+          <button type="submit" class="btn btn-accent">Move here</button></div>
+      </form>`);
+  },
+  'xp-delete': () => { closeMenu(); const keys = [...XP.sel]; if (keys.length) deleteItems(keys); },
   'rename-file': (_, el) => {
     const f = S.files.find(x => x.id === el.dataset.id);
     if (f) openSheet(textSheet({ title: 'Rename file', label: 'File name', value: f.name, form: 'rename-file', id: f.id }));
   },
   'open-file': (_, el) => openLightbox(el.dataset.id),
   'dl-file': (_, el) => download(el.dataset.id),
-  'del-file': async (_, el) => {
-    const id = el.dataset.id;
-    if (!confirm('Delete this file? It is also removed from any note it is attached to.')) return;
-    try { await blobs.del(id); } catch (e) { /* the record goes either way */ }
-    commit(s => {
-      s.files = s.files.filter(f => f.id !== id);
-      s.notes.forEach(n => { n.files = n.files.filter(x => x !== id); });
-      s.certs.forEach(c => { if (c.fileId === id) c.fileId = null; });
-      if (s.fileId === id) s.fileId = null;
-    });
-    toast('File deleted');
-  },
+  'del-file': (_, el) => deleteItems(['f:' + el.dataset.id]),
 
   /* certificates ----------------------------------------------------------- */
   'new-cert': () => openSheet(certSheet({})),
@@ -2228,13 +3003,16 @@ const actions = {
   export: () => exportBackup(),
   wipe: () => {
     if (!confirm('Erase all notes, timetable entries, tasks and stored files from this browser?')) return;
-    if (!confirm('Last check — this cannot be undone. Erase everything?')) return;
+    if (!confirm('Last check — this cannot be undone. Erase everything on this device?')) return;
+    const wasSynced = !!SYNC.cfg;
+    disconnectSync();
     Promise.all(S.files.map(f => blobs.del(f.id).catch(() => {}))).then(() => {
-      [KEY, ...OLD_KEYS].forEach(k => localStorage.removeItem(k));
+      try { [KEY, ...OLD_KEYS].forEach(k => localStorage.removeItem(k)); } catch (e) { /* fine */ }
       S = seed();
+      snapshot();
       save();
       render();
-      toast('Everything erased');
+      toast(wasSynced ? 'This device is erased — your cloud copy is untouched' : 'Everything erased');
     });
   },
 
@@ -2263,6 +3041,7 @@ const actions = {
 
 /* ---------- clicks ---------- */
 document.addEventListener('click', e => {
+  if (!e.target.closest('#ctx')) closeMenu();
   if (e.target === $('#palette')) return openPalette(false);
   if (e.target === $('#sheet')) return closeSheet();
   if (e.target === $('#lightbox')) return closeLightbox();
@@ -2373,9 +3152,25 @@ document.addEventListener('submit', e => {
     case 'new-folder': {
       const name = val('value');
       if (!name) return;
-      commit(s => { const id = uid(); s.folders.push({ id, name, created: Date.now() }); s.folderId = id; s.view = 'files'; });
+      commit(s => { s.folders.push({ id: uid(), name, parentId: s.folderId && folderById(s.folderId) ? s.folderId : null, created: Date.now() }); s.view = 'files'; });
       closeSheet();
       toast('Folder created');
+      break;
+    }
+    case 'move-items': {
+      const keys = [...XP.sel];
+      closeSheet();
+      moveItems(keys, val('target') || null);
+      XP.sel.clear();
+      xpSelectionUI();
+      break;
+    }
+    case 'sync-connect': {
+      if (e.submitter && e.submitter.name === 'use') {
+        const c = readSetupCode(val('code'));
+        if (!c) { toast('That setup code is not valid — copy it again from the connected device.'); return; }
+        connectSync(c.r, c.t);
+      } else connectSync(val('repo'), val('token'));
       break;
     }
     case 'rename-folder': {
@@ -2437,7 +3232,7 @@ document.addEventListener('change', e => {
       if (n && !n.files.includes(fid)) n.files.push(fid);
     });
   }
-  if (act === 'move-file') return commit(s => { const f = s.files.find(x => x.id === el.dataset.id); if (f) f.folderId = el.value || null; });
+  if (act === 'xp-sort') return commit(s => { s.fileSort = { key: el.value, dir: s.fileSort.dir || 1 }; });
   if (act === 'set-remind') {
     const { id, kind } = el.dataset;
     const v = el.value === '' ? null : Number(el.value);
@@ -2493,6 +3288,74 @@ document.addEventListener('drop', e => {
   });
 });
 
+/* ---------- drag files and folders between folders ---------- */
+let xpDrag = null;
+document.addEventListener('dragstart', e => {
+  const item = e.target.closest?.('.xp-item');
+  if (!item) return;
+  const key = (item.dataset.kind === 'folder' ? 'd:' : 'f:') + item.dataset.id;
+  if (!XP.sel.has(key)) { XP.sel = new Set([key]); xpSelectionUI(); }
+  xpDrag = [...XP.sel];
+  e.dataTransfer.setData('application/x-studyframe', xpDrag.join(','));
+  e.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragend', () => { xpDrag = null; $$('.drop-into').forEach(x => x.classList.remove('drop-into')); });
+document.addEventListener('dragover', e => {
+  if (!xpDrag) return;
+  const t = e.target.closest?.('[data-drop]');
+  $$('.drop-into').forEach(x => { if (x !== t) x.classList.remove('drop-into'); });
+  if (!t) return;
+  const target = t.dataset.drop || null;
+  if (xpDrag.includes('d:' + target)) return;
+  e.preventDefault();
+  t.classList.add('drop-into');
+});
+document.addEventListener('drop', e => {
+  if (!xpDrag) return;
+  const t = e.target.closest?.('[data-drop]');
+  if (!t) return;
+  e.preventDefault();
+  const keys = xpDrag; xpDrag = null;
+  moveItems(keys, t.dataset.drop || null);
+  XP.sel.clear();
+});
+
+/* ---------- double-click, right-click and long-press in the file explorer ---------- */
+document.addEventListener('dblclick', e => {
+  const item = e.target.closest('.xp-item');
+  if (!item || e.target.closest('.xp-more')) return;
+  xpOpenItem(item.dataset.kind, item.dataset.id);
+});
+document.addEventListener('contextmenu', e => {
+  const item = e.target.closest('.xp-item');
+  if (item) {
+    e.preventDefault();
+    const key = (item.dataset.kind === 'folder' ? 'd:' : 'f:') + item.dataset.id;
+    if (!XP.sel.has(key)) { XP.sel = new Set([key]); xpSelectionUI(); }
+    return itemMenu(e.clientX, e.clientY);
+  }
+  if (e.target.closest('#xpPane')) { e.preventDefault(); XP.sel.clear(); xpSelectionUI(); blankMenu(e.clientX, e.clientY); }
+});
+let pressT = null;
+document.addEventListener('touchstart', e => {
+  const item = e.target.closest('.xp-item');
+  if (!item) return;
+  const t = e.touches[0];
+  pressT = setTimeout(() => {
+    pressT = 'fired';
+    const key = (item.dataset.kind === 'folder' ? 'd:' : 'f:') + item.dataset.id;
+    XP.sel = new Set([key]); xpSelectionUI();
+    itemMenu(t.clientX, t.clientY);
+  }, 520);
+}, { passive: true });
+['touchend', 'touchmove', 'touchcancel'].forEach(ev => document.addEventListener(ev, e => {
+  if (pressT === 'fired' && ev === 'touchend') { e.preventDefault(); pressT = null; return; }
+  if (pressT && pressT !== 'fired') clearTimeout(pressT);
+  pressT = null;
+}, { passive: false }));
+window.addEventListener('scroll', closeMenu, true);
+window.addEventListener('resize', closeMenu);
+
 /* ---------- keyboard ---------- */
 document.addEventListener('keydown', e => {
   if (!$('#palette').hidden) {
@@ -2503,8 +3366,21 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') return openPalette(false);
   }
   if (e.key === 'Escape') {
+    if ($('#ctx')) return closeMenu();
     if (!$('#lightbox').hidden) return closeLightbox();
     if (!$('#sheet').hidden) return closeSheet();
+  }
+  if (e.target.id === 'noteTitle' && e.key === 'Enter') { e.preventDefault(); e.target.blur(); return actions['open-book'](); }
+  if (e.target.classList?.contains('cover') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return actions['open-book'](); }
+  if (S.view === 'files' && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && $('#sheet').hidden) {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && XP.sel.size) { e.preventDefault(); return deleteItems([...XP.sel]); }
+    if (e.key === 'Enter' && e.target.classList?.contains('xp-item')) { e.preventDefault(); return xpOpenItem(e.target.dataset.kind, e.target.dataset.id); }
+    if (e.key === 'F2' && XP.sel.size === 1) { e.preventDefault(); return actions['xp-rename'](); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' && $('#lightbox').hidden) {
+      e.preventDefault();
+      XP.sel = new Set($$('#xpPane .xp-item').map(x => (x.dataset.kind === 'folder' ? 'd:' : 'f:') + x.dataset.id));
+      return xpSelectionUI();
+    }
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !$('#paperBody')?.contains(document.activeElement)) {
     e.preventDefault(); return openPalette(true);
@@ -2519,7 +3395,340 @@ document.addEventListener('keydown', e => {
 });
 
 /* =============================================================================
-   15 — boot
+   15 — cloud sync through a private GitHub repository
+   A static site has no server of its own, so the shared copy lives in a
+   private repository you own. Each device keeps working offline from its own
+   storage and, when it can, merges with that copy:
+     studyframe/state.json      notes, timetable, tasks, folders, certificates
+     studyframe/files/<id>      each uploaded file
+   Merging is per record — the newer edit of a note, task or class wins, and
+   deletions travel as tombstones — so two devices never overwrite each other
+   wholesale. The access token stays in this browser's storage only.
+   ============================================================================= */
+const SYNC_KEY = 'studyframe.sync';
+const STATE_PATH = 'studyframe/state.json';
+const FILES_DIR = 'studyframe/files';
+const MAX_SYNC_FILE = 40 * 1048576;
+const SYNC = { cfg: null, busy: false, again: false, status: 'off', msg: '', last: 0, timer: null, skipped: new Set() };
+try { SYNC.cfg = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null'); } catch (e) { SYNC.cfg = null; }
+if (SYNC.cfg && !(SYNC.cfg.owner && SYNC.cfg.repo && SYNC.cfg.token)) SYNC.cfg = null;
+try { SYNC.last = Number(localStorage.getItem(SYNC_KEY + '.last')) || 0; } catch (e) { /* fine */ }
+if (SYNC.cfg) SYNC.status = 'idle';
+
+/* ---------- GitHub contents API ---------- */
+const enc64 = str => {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const dec64 = b64 => {
+  const bin = atob(String(b64).replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+const blob64 = blob => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(',')[1] || '');
+  r.onerror = () => rej(r.error);
+  r.readAsDataURL(blob);
+});
+
+class GHError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+
+async function gh(path, opts = {}, cfg = SYNC.cfg) {
+  const url = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: opts.method || 'GET',
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: opts.accept || 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) { throw new GHError(0, 'Offline — will try again shortly.'); }
+  if (res.status === 404 && opts.allow404) return null;
+  if (!res.ok) {
+    let m = '';
+    try { m = (await res.json()).message || ''; } catch (e) { /* no body */ }
+    const why = res.status === 401 ? 'The token was refused. Check it has not expired.'
+      : res.status === 403 ? (/rate limit/i.test(m) ? 'GitHub rate limit reached — sync resumes in a few minutes.' : 'The token cannot write to that repository. Give it Contents: Read and write.')
+        : res.status === 404 ? 'Repository not found. Check the name and that the token can see it.'
+          : `GitHub said: ${m || res.status}`;
+    throw new GHError(res.status, why);
+  }
+  return opts.raw ? res : (res.status === 204 ? null : res.json());
+}
+const contentPath = p => `/contents/${p.split('/').map(encodeURIComponent).join('/')}`;
+
+async function ghGetState() {
+  const meta = await gh(contentPath(STATE_PATH), { allow404: true });
+  if (!meta) return null;
+  let text;
+  if (meta.content && meta.encoding === 'base64') text = dec64(meta.content);
+  else text = await (await gh(contentPath(STATE_PATH), { accept: 'application/vnd.github.raw+json', raw: true })).text();
+  return { sha: meta.sha, data: JSON.parse(text) };
+}
+async function ghPutState(payload, sha) {
+  const r = await gh(contentPath(STATE_PATH), {
+    method: 'PUT',
+    body: { message: `Studyframe sync ${new Date().toISOString()}`, content: enc64(JSON.stringify(payload)), ...(sha ? { sha } : {}) },
+  });
+  return r?.content?.sha;
+}
+async function ghListFiles() {
+  const list = await gh(contentPath(FILES_DIR), { allow404: true });
+  if (!Array.isArray(list)) return null;
+  const out = new Map();
+  list.forEach(x => { if (!x.name.startsWith('.')) out.set(x.name, x.sha); });
+  return out;
+}
+async function ghGetFile(id) {
+  const res = await gh(contentPath(`${FILES_DIR}/${id}`), { accept: 'application/vnd.github.raw+json', raw: true, allow404: true });
+  if (!res) return null;
+  const f = S.files.find(x => x.id === id);
+  const b = await res.blob();
+  return f?.type ? new Blob([b], { type: f.type }) : b;
+}
+
+/* ---------- merge ---------- */
+function payloadOf(s) {
+  const p = { v: 4, settings: s.settings, settingsAt: s.settingsAt || 0, deleted: s.deleted || {} };
+  SYNCED.forEach(k => { p[k] = s[k] || []; });
+  return p;
+}
+function mergeInto(local, remote) {
+  const deleted = { ...(remote.deleted || {}) };
+  Object.entries(local.deleted || {}).forEach(([id, t]) => { deleted[id] = Math.max(deleted[id] || 0, t); });
+  const cutoff = Date.now() - 90 * 86400000;
+  Object.keys(deleted).forEach(id => { if (deleted[id] < cutoff) delete deleted[id]; });
+  const out = { deleted };
+  SYNCED.forEach(k => {
+    const map = new Map();
+    (local[k] || []).forEach(r => map.set(r.id, r));
+    (Array.isArray(remote[k]) ? remote[k] : []).forEach(r => {
+      if (!r || !r.id) return;
+      const mine = map.get(r.id);
+      if (!mine || (r._t || 0) >= (mine._t || 0)) map.set(r.id, r);
+    });
+    out[k] = [...map.values()].filter(r => !(deleted[r.id] && deleted[r.id] >= (r._t || 0)));
+  });
+  const remoteNewer = (remote.settingsAt || 0) > (local.settingsAt || 0);
+  out.settings = remoteNewer ? Object.assign({}, local.settings, remote.settings) : local.settings;
+  out.settingsAt = Math.max(remote.settingsAt || 0, local.settingsAt || 0);
+  return out;
+}
+/** Put merged shared data into S, keep this device's own view state. */
+function adopt(merged) {
+  SYNCED.forEach(k => { S[k] = merged[k]; });
+  S.settings = merged.settings; S.settingsAt = merged.settingsAt; S.deleted = merged.deleted;
+  upgrade(S);
+  snapshot();
+  save();
+}
+
+/* ---------- the sync loop ---------- */
+function setSync(status, msg = '') {
+  SYNC.status = status; SYNC.msg = msg;
+  syncBadge();
+  const p = $('#syncState');
+  if (p) p.innerHTML = syncStateHTML();
+}
+function syncBadge() {
+  const b = $('#syncBtn');
+  if (!b) return;
+  const st = SYNC.cfg ? SYNC.status : 'off';
+  b.dataset.state = st;
+  b.title = st === 'off' ? 'Sync is off — set it up in Settings'
+    : st === 'syncing' ? 'Syncing…' : st === 'error' ? `Sync problem: ${SYNC.msg}` : `Synced ${SYNC.last ? relTime(SYNC.last) : ''}`;
+  b.setAttribute('aria-label', b.title);
+}
+
+async function syncNow({ manual = false } = {}) {
+  if (!SYNC.cfg) return;
+  if (SYNC.busy) { SYNC.again = true; return; }
+  if (!navigator.onLine) { setSync('error', 'Offline — will sync when the connection is back.'); return; }
+  SYNC.busy = true;
+  setSync('syncing');
+  try {
+    stamp();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const remote = await ghGetState();
+      const before = JSON.stringify(payloadOf(S));
+      const merged = remote ? mergeInto(payloadOf(S), remote.data || {}) : payloadOf(S);
+      const mergedJSON = JSON.stringify(payloadOf(merged));
+      if (mergedJSON !== before) { adopt(merged); renderSafely(); }
+      if (!remote || mergedJSON !== JSON.stringify(payloadOf(Object.assign({ settings: {} }, remote.data)))) {
+        try { await ghPutState(payloadOf(S), remote?.sha); }
+        catch (e) { if (e.status === 409 || e.status === 422) continue; throw e; }
+      }
+      break;
+    }
+    await syncFiles();
+    SYNC.last = Date.now();
+    try { localStorage.setItem(SYNC_KEY + '.last', String(SYNC.last)); } catch (e) { /* fine */ }
+    setSync('ok');
+    if (manual) toast('Everything is in sync');
+  } catch (e) {
+    setSync('error', e.message || 'Sync failed');
+    if (manual) toast(e.message || 'Sync failed');
+  } finally {
+    SYNC.busy = false;
+    if (SYNC.again) { SYNC.again = false; setTimeout(() => syncNow(), 400); }
+  }
+}
+
+async function syncFiles() {
+  let remote = await ghListFiles();
+  if (!remote) {
+    // keep the folder in existence, so later checks find it instead of a 404
+    await gh(contentPath(`${FILES_DIR}/.keep`), { method: 'PUT', body: { message: 'Studyframe files folder', content: enc64('Uploaded files live here.') } }).catch(() => {});
+    remote = new Map();
+  }
+  for (const f of S.files) {
+    if (remote.has(f.id) || SYNC.skipped.has(f.id)) continue;
+    let blob = null;
+    try { blob = await blobs.get(f.id); } catch (e) { /* not on this device */ }
+    if (!blob) continue;                                   // another device will upload it
+    if (blob.size > MAX_SYNC_FILE) {
+      SYNC.skipped.add(f.id);
+      toast(`${f.name} is over ${MAX_SYNC_FILE / 1048576} MB, so it stays on this device only.`);
+      continue;
+    }
+    await gh(contentPath(`${FILES_DIR}/${f.id}`), {
+      method: 'PUT',
+      body: { message: `Add ${f.name}`, content: await blob64(blob) },
+    }).catch(e => { if (e.status !== 422) throw e; });       // 422: already there from another device
+  }
+  for (const [name, sha] of remote) {
+    if (S.deleted[name] && !S.files.some(f => f.id === name)) {
+      await gh(contentPath(`${FILES_DIR}/${name}`), { method: 'DELETE', body: { message: 'Remove deleted file', sha } }).catch(() => {});
+    }
+  }
+}
+
+const schedulePush = debounce(() => { if (SYNC.cfg) syncNow(); }, 2500);
+
+/* ---------- connect / disconnect ---------- */
+function parseRepo(str) {
+  const m = String(str || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '').match(/^([\w.-]+)\/([\w.-]+)$/);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+async function connectSync(repoStr, token) {
+  const r = parseRepo(repoStr);
+  if (!r) return toast('Write the repository as owner/name, for example jen/studyframe-data.');
+  token = String(token || '').trim();
+  if (!token) return toast('Paste the access token as well.');
+  const cfg = { ...r, token };
+  setSync('syncing');
+  try {
+    const info = await gh('', {}, cfg);
+    if (info && info.permissions && info.permissions.push === false) throw new GHError(403, 'That token can read the repository but not write to it.');
+    if (info && info.private === false && !confirm('That repository is public — anyone could read your notes. Use it anyway?')) { setSync('off'); return; }
+    const remote = await (async () => { const old = SYNC.cfg; SYNC.cfg = cfg; try { return await ghGetState(); } finally { SYNC.cfg = old; } })();
+    const finish = mode => {
+      SYNC.cfg = cfg;
+      try { localStorage.setItem(SYNC_KEY, JSON.stringify(cfg)); } catch (e) { /* session only */ }
+      if (mode === 'replace' && remote) {
+        const d = remote.data || {};
+        adopt({
+          ...Object.fromEntries(SYNCED.map(k => [k, Array.isArray(d[k]) ? d[k] : []])),
+          settings: Object.assign({}, S.settings, d.settings || {}),
+          settingsAt: d.settingsAt || 0,
+          deleted: d.deleted || {},
+        });
+        S.folderId = null; S.noteId = null;
+        save();
+      }
+      closeSheet();
+      render();
+      syncNow({ manual: true });
+    };
+    if (remote) {
+      const d = remote.data || {};
+      const count = k => (Array.isArray(d[k]) ? d[k].length : 0);
+      openSheet(`<h3>Your cloud copy already has data</h3>
+        <p class="hint" style="margin-bottom:14px">It holds ${count('notes')} note${count('notes') === 1 ? '' : 's'}, ${count('tasks')} task${count('tasks') === 1 ? '' : 's'},
+          ${count('classes') + count('events')} timetable entr${count('classes') + count('events') === 1 ? 'y' : 'ies'} and ${count('files')} file${count('files') === 1 ? '' : 's'}.
+          This device has ${S.notes.length} note${S.notes.length === 1 ? '' : 's'} and ${S.tasks.length} task${S.tasks.length === 1 ? '' : 's'}.</p>
+        <div class="choice-list">
+          <button class="choice" data-act="sync-choice" data-mode="replace"><b>Use the cloud copy on this device</b><span>Best when this is your second device. What is on this device now is replaced.</span></button>
+          <button class="choice" data-act="sync-choice" data-mode="merge"><b>Merge both</b><span>Keeps everything from both. Example data that each device made separately may then appear twice.</span></button>
+        </div>
+        <div class="form-actions"><span class="spacer"></span><button type="button" class="btn" data-act="close-sheet">Cancel</button></div>`);
+      SYNC.pendingFinish = finish;
+      setSync('off');
+    } else finish('merge');
+  } catch (e) {
+    setSync('off');
+    toast(e.message || 'Could not reach GitHub.');
+  }
+}
+
+function disconnectSync() {
+  SYNC.cfg = null;
+  try { localStorage.removeItem(SYNC_KEY); } catch (e) { /* fine */ }
+  setSync('off');
+}
+
+const setupCode = () => btoa(unescape(encodeURIComponent(JSON.stringify({ r: `${SYNC.cfg.owner}/${SYNC.cfg.repo}`, t: SYNC.cfg.token }))));
+function readSetupCode(code) {
+  try { const o = JSON.parse(decodeURIComponent(escape(atob(String(code).trim())))); return o.r && o.t ? o : null; } catch (e) { return null; }
+}
+
+function syncStateHTML() {
+  if (!SYNC.cfg) return '';
+  const st = SYNC.status;
+  return `<span class="sync-dot" data-state="${st}"></span>
+    <span>${st === 'syncing' ? 'Syncing…' : st === 'error' ? esc(SYNC.msg) : SYNC.last ? `Last synced ${esc(relTime(SYNC.last))}` : 'Connected — not synced yet'}</span>`;
+}
+
+function syncPanelHTML() {
+  if (SYNC.cfg) {
+    return `<section class="panel sync-panel">
+      <div class="panel-h">${icon('cloud')}<h3>Sync across devices</h3><span class="spacer"></span>
+        <span class="chip">${icon('check')}On</span></div>
+      <p class="sync-repo">Saving to <b>${esc(SYNC.cfg.owner)}/${esc(SYNC.cfg.repo)}</b> on GitHub. Notes, timetable, tasks, files and certificates are the same on every device connected to it.</p>
+      <p class="sync-state" id="syncState">${syncStateHTML()}</p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn btn-accent" data-act="sync-now">${icon('cloud')}Sync now</button>
+        <button class="btn" data-act="sync-code">${icon('link')}Copy setup code for another device</button>
+        <button class="btn btn-danger" data-act="sync-off">Turn off on this device</button>
+      </div>
+      <p class="hint" style="margin-top:12px">It syncs on its own when you make a change, when you come back to the tab, and every minute while it is open.</p>
+    </section>`;
+  }
+  return `<section class="panel sync-panel">
+    <div class="panel-h">${icon('cloud')}<h3>Sync across devices</h3><span class="spacer"></span><span class="chip">Off</span></div>
+    <p class="hint" style="margin-bottom:14px">Studyframe is a static site, so the shared copy lives in a <b>private GitHub repository of your own</b>. Set it up once, then connect each phone or laptop.</p>
+    <div class="sync-grid">
+      <ol class="sync-steps">
+        <li><b>Make a private repository.</b> On GitHub choose <i>New repository</i>, name it e.g. <code>studyframe-data</code>, set it to <b>Private</b> and tick <i>Add a README</i>.</li>
+        <li><b>Make an access token.</b> GitHub → Settings → Developer settings → Personal access tokens → <i>Fine-grained tokens</i> → Generate. Under <i>Repository access</i> pick <i>Only select repositories</i> → <code>studyframe-data</code>. Under <i>Permissions → Repository</i> set <b>Contents</b> to <b>Read and write</b>.</li>
+        <li><b>Paste both here</b> and press Connect. On your other devices, use the setup code instead.</li>
+      </ol>
+      <form class="sync-form" data-form="sync-connect">
+        <div class="field"><span>Repository</span><input type="text" name="repo" placeholder="your-name/studyframe-data" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+        <div class="field"><span>Access token</span><input type="password" name="token" placeholder="github_pat_…" autocomplete="off"></div>
+        <button class="btn btn-accent" type="submit">${icon('cloud')}Connect</button>
+        <hr class="hr">
+        <div class="field"><span>…or a setup code from a device that is already connected</span><input type="text" name="code" placeholder="Paste setup code" autocomplete="off" spellcheck="false"></div>
+        <button class="btn" type="submit" name="use" value="code">Connect with code</button>
+        <p class="hint">The token is kept in this browser only and sent to nobody but GitHub.</p>
+      </form>
+    </div>
+  </section>`;
+}
+
+/* =============================================================================
+   16 — boot
    ============================================================================= */
 // If anything above threw, the markup fallback in <main> is still on screen and
 // this surfaces the actual reason rather than leaving a blank page.
@@ -2532,12 +3741,35 @@ addEventListener('error', e => {
   box.appendChild(p);
 });
 
+// A file dropped anywhere outside the Files window should not make the browser leave the app.
+['dragover', 'drop'].forEach(ev => addEventListener(ev, e => {
+  if ([...(e.dataTransfer?.types || [])].includes('Files') && !e.target.closest?.('#xp')) e.preventDefault();
+}));
+
 addEventListener('beforeunload', save);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { uiTick(); remindTick(); } });
-addEventListener('resize', debounce(() => { if (S.view === 'timetable') fitTimetable(); }, 140));
+addEventListener('pagehide', save);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { save(); return; }
+  uiTick(); remindTick();
+  if (SYNC.cfg) syncNow();
+});
+addEventListener('online', () => { if (SYNC.cfg) syncNow(); });
+
+let lastW = innerWidth;
+addEventListener('resize', debounce(() => {
+  if (S.view === 'timetable') fitTimetable();
+  // phones change height when the keyboard opens; only re-lay the book on a width change
+  if (S.view === 'notes' && innerWidth !== lastW) layoutBook(true);
+  lastW = innerWidth;
+}, 140));
 mq.addEventListener('change', () => render());
 
 render();
 remindTick();
 setInterval(uiTick, 1000);
 setInterval(remindTick, 15000);
+if (SYNC.cfg) {
+  setTimeout(() => syncNow(), 300);
+  setInterval(() => { if (!document.hidden) syncNow(); }, 60000);
+}
+
