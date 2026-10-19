@@ -1189,41 +1189,44 @@ function timetableWeek(cur) {
   const span = W.hi - W.lo;
   const pct = m => ((clamp(m, W.lo, W.hi) - W.lo) / span) * 100;
 
-  const gutter = [];
-  for (let m = W.lo; m < W.hi; m += 60) gutter.push(`<span style="top:${pct(m)}%">${pad(m / 60)}:00</span>`);
+  /* hours run across the top… */
+  const hours = [];
+  for (let m = W.lo; m <= W.hi; m += 60) hours.push(`<span style="left:${pct(m)}%">${pad(m / 60)}:00</span>`);
 
-  const heads = [], cols = [];
-  keys.forEach((key, i) => {
+  /* …and each day is a row down the side */
+  const rows = keys.map((key, i) => {
     const d = parseISO(key), isToday = key === todayISO();
     const tasks = S.tasks.filter(t => t.date === key && !t.done);
-    heads.push(`<button class="tt-dayhead ${isToday ? 'is-today' : ''}" data-act="goto-day" data-date="${key}" title="Open ${DAY_FULL[i]}">
-      <span class="dw">${DAY[i]}</span><span class="dn">${d.getDate()}</span>
-      <span class="pips">${tasks.slice(0, 4).map(t => `<i style="--pcol:${prio(t.priority).css}"></i>`).join('')}</span>
-    </button>`);
-
-    const blocks = laneLayout(dayBlocks(key)).map(it => blockHTML(it, pct)).join('');
-    /* tasks due outside the hours shown are pinned to the top or bottom edge */
+    const lay = laneLayout(dayBlocks(key));
+    const lanes = lay.reduce((n, it) => Math.max(n, it.n), 1);
+    const blocks = lay.map(it => blockHTMLH(it, pct)).join('');
+    /* tasks due outside the hours shown are pinned to the left or right edge */
     const chips = tasks.filter(t => t.time).map(t => {
       const m = toMin(t.time);
-      const pos = m < W.lo ? 'top:2px' : m > W.hi ? 'top:calc(100% - 18px)' : `top:clamp(2px, calc(${pct(m)}% - 8px), calc(100% - 18px))`;
+      const pos = m < W.lo ? 'left:2px' : m > W.hi ? 'right:2px' : `left:clamp(2px, ${pct(m)}%, calc(100% - 142px))`;
       const edge = m < W.lo || m > W.hi ? `<span class="tt-due">${esc(t.time)}</span>` : '';
       return `<button class="tt-task" style="${pos};--pcol:${prio(t.priority).css}"
         data-act="edit-task" data-id="${t.id}" title="${esc(t.title)} · due ${esc(t.time)}">${icon('flag')}<b>${esc(t.title)}</b>${edge}</button>`;
     }).join('');
 
-    cols.push(`<div class="tt-col ${isToday ? 'is-today' : ''} ${i > 4 ? 'is-weekend' : ''}" data-act="new-entry" data-date="${key}" data-wd="${i}">
-      ${blocks}${chips}
-      ${isToday ? nowLineHTML(pct) : ''}
-    </div>`);
-  });
+    return `<div class="tth-row ${isToday ? 'is-today' : ''} ${i > 4 ? 'is-weekend' : ''}" style="--i:${i};--ln:${lanes}">
+      <button class="tth-day" data-act="goto-day" data-date="${key}" title="Open ${DAY_FULL[i]}">
+        <span class="dw">${DAY_FULL[i]}</span>
+        <span class="dn">${d.getDate()} ${esc(fmtDate(d, { month: 'short' }))}</span>
+        <span class="pips">${tasks.slice(0, 4).map(t => `<i style="--pcol:${prio(t.priority).css}"></i>`).join('')}</span>
+      </button>
+      <div class="tth-track" data-act="new-entry" data-date="${key}" data-wd="${i}">
+        ${blocks}${chips}${isToday ? nowLineHTML(pct) : ''}
+      </div>
+    </div>`;
+  }).join('');
 
   return `<div class="wrap">
     ${ttBar(`Week of ${fmtDate(mon, { day: 'numeric', month: 'long' })}`, 'week')}
-    <div class="tt" id="ttGrid">
-      <div class="tt-days"><div></div>${heads.join('')}</div>
-      <div class="tt-body" id="ttBody" style="height:${W.hours * 52}px">
-        <div class="tt-gutter">${gutter.join('')}</div>
-        ${cols.join('')}
+    <div class="tth" id="ttGrid">
+      <div class="tth-inner" style="--hrs:${W.hours}">
+        <div class="tth-head"><div class="tth-corner">${icon('clock')}</div><div class="tth-hours">${hours.join('')}</div></div>
+        <div class="tth-body" id="ttBody">${rows}</div>
       </div>
     </div>
     <p class="tt-legend">
@@ -1235,43 +1238,41 @@ function timetableWeek(cur) {
   </div>`;
 }
 
-function blockHTML(it, pct) {
+function blockHTMLH(it, pct) {
   const b = it.b;
-  const top = pct(toMin(b.start));
-  const h = Math.max(1.6, pct(toMin(b.end)) - top);
-  const w = 100 / it.n;
+  const left = pct(toMin(b.start));
+  const w = Math.max(1.2, pct(toMin(b.end)) - left);
+  const h = 100 / it.n;
   const bell = (b.remind !== null && b.remind !== undefined && b.remind >= 0) ? icon('bell', 'ic bell') : '';
   const where = [code(b.subjectId), b.room].filter(Boolean).join(' · ');
   return `<button class="tt-block ${b.kind === 'event' ? 'is-event' : ''}"
-    style="top:${top}%;height:${h}%;left:calc(${it.lane * w}% + 2px);width:calc(${w}% - 4px);--subject:${hue(b.subjectId)}"
+    style="left:calc(${left}% + 1px);width:calc(${w}% - 2px);top:calc(${it.lane * h}% + 3px);height:calc(${h}% - 6px);--subject:${hue(b.subjectId)}"
     data-act="edit-entry" data-id="${b.id}" data-kind="${b.kind}" title="${esc(b.title)} · ${esc(b.start)}–${esc(b.end)}${b.room ? ' · ' + esc(b.room) : ''}">
-    ${bell}<span class="bn">${esc(b.title)}<span class="bt-inline"> · ${esc(b.start)}</span></span><span class="bt">${esc(b.start)}–${esc(b.end)}</span>
-    ${where ? `<span class="br">${esc(where)}</span>` : ''}
+    ${bell}<span class="bn">${esc(b.title)}<span class="bt-inline"> · ${esc(b.start)}</span></span>
+    ${where ? `<span class="br">${esc(where)}</span>` : ''}<span class="bt">${esc(b.start)}–${esc(b.end)}</span>
   </button>`;
 }
 
 function nowLineHTML(pct) {
   const n = new Date(), m = n.getHours() * 60 + n.getMinutes();
   if (m < TT.lo || m > TT.hi) return '';
-  return `<div class="tt-now" id="ttNow" style="top:${pct(m)}%"></div>`;
+  return `<div class="tt-now" id="ttNow" style="left:${pct(m)}%"></div>`;
 }
 
-/** Fit the whole week on screen, then label each entry by how much room it got. */
+/** Fit the seven day-rows on screen, then label each entry by how much room it got. */
 function fitTimetable() {
   const grid = $('#ttGrid'), body = $('#ttBody');
   if (!grid || !body) return;
-  const head = $('.tt-days')?.offsetHeight || 52;
-  const top = grid.getBoundingClientRect().top - $('#main').getBoundingClientRect().top;
-  const avail = window.innerHeight - $('#main').getBoundingClientRect().top - top - head - 56;
-  // fill the screen; never below 40px an hour (short entries have a minimum height of their own)
-  const px = clamp(avail / TT.hours, 40, 110);
-  grid.style.setProperty('--hourpx', `${px}px`);
-  body.style.height = `${Math.round(px * TT.hours)}px`;
+  const rows = $$('.tth-row', body);
+  if (!rows.length) return;
+  const head = $('.tth-head', grid)?.offsetHeight || 38;
+  const avail = window.innerHeight - grid.getBoundingClientRect().top - head - 64;
+  grid.style.setProperty('--rowh', `${Math.round(clamp(avail / rows.length, 64, 120))}px`);
   $$('.tt-block', body).forEach(b => {
     b.classList.remove('sm', 'md', 'narrow');
     const h = b.offsetHeight;
-    if (h < 36) b.classList.add('sm');
-    else if (h < 60) b.classList.add('md');
+    if (h < 40) b.classList.add('sm');
+    else if (h < 62) b.classList.add('md');
     if (b.offsetWidth < 70) b.classList.add('narrow');
   });
 }
@@ -1411,7 +1412,7 @@ function viewTasks() {
   const top = [...open].sort((a, b) => heat(b) - heat(a))[0];
   const late = open.filter(t => urgency(t.date) === 'late').length;
 
-  return `<div class="wrap">
+  return `<div class="wrap tf">
     <div class="sec-h">
       <h2>Tasks</h2>
       <p>${open.length} open${late ? ` · ${late} overdue` : ''}</p>
@@ -1422,6 +1423,10 @@ function viewTasks() {
       <span class="focus-k">All clear</span>
       <div><h3>Nothing on your plate</h3><p class="m">Add a task below and the most pressing one is pinned here.</p></div>
     </div>`}
+
+    <div class="tf-overview">
+      ${chartPanel(all)}${donutPanel(all)}${upcomingPanel(open)}
+    </div>
 
     <div class="task-bar">
       <div class="seg">
@@ -1458,6 +1463,142 @@ function viewTasks() {
     <p class="hint" style="margin-top:9px">Filed under ${esc(activeSubj().name)}. Change the subject in the top bar to file it elsewhere.</p>
   </div>`;
 }
+
+/* ---- overview strip: progress chart, status donut, upcoming ---------------- */
+let TASKRANGE = 'day';
+
+function taskStatus(t) {
+  if (t.done) return { k: 'done', l: 'Done' };
+  return { late: { k: 'late', l: 'Overdue' }, today: { k: 'today', l: 'Due today' }, soon: { k: 'soon', l: 'Due soon' }, later: { k: 'later', l: 'Planned' } }[urgency(t.date)];
+}
+const taskState = t => t.done ? 'done' : t.steps.some(s => s.done) ? 'doing' : 'todo';
+
+function smoothPath(p, lo, hi) {
+  if (p.length < 2) return '';
+  const cy = y => clamp(y, lo, hi);
+  let d = `M${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)}`;
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+    d += ` C${(p1[0] + (p2[0] - p0[0]) / 6).toFixed(1)} ${cy(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)},${(p2[0] - (p3[0] - p1[0]) / 6).toFixed(1)} ${cy(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)},${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+function chartPanel(all) {
+  const today = parseISO(todayISO());
+  const B = [];
+  if (TASKRANGE === 'month') {
+    for (let i = 5; i >= 0; i--) {
+      const s = new Date(today.getFullYear(), today.getMonth() - i, 1), e = new Date(today.getFullYear(), today.getMonth() - i + 1, 1);
+      B.push({ s: s.getTime(), e: e.getTime(), l: fmtDate(s, { month: 'short' }) });
+    }
+  } else if (TASKRANGE === 'week') {
+    const m = mondayOf(today);
+    for (let i = 7; i >= 0; i--) { const s = addDays(m, -7 * i); B.push({ s: s.getTime(), e: addDays(s, 7).getTime(), l: fmtDate(s, { day: 'numeric', month: 'short' }) }); }
+  } else {
+    for (let i = 13; i >= 0; i--) { const s = addDays(today, -i); B.push({ s: s.getTime(), e: addDays(s, 1).getTime(), l: fmtDate(s, { day: 'numeric', month: 'short' }) }); }
+  }
+  const fin = B.map(b => all.filter(t => t.doneAt && t.doneAt >= b.s && t.doneAt < b.e).length);
+  const add = B.map(b => all.filter(t => t.created && t.created >= b.s && t.created < b.e).length);
+  const sumF = fin.reduce((a, b) => a + b, 0), sumA = add.reduce((a, b) => a + b, 0);
+
+  const VW = 520, VH = 240, L = 30, R = 10, T = 12, Bm = 28, base = VH - Bm;
+  const top = Math.max(3, Math.ceil(Math.max(...fin, ...add) / 3) * 3);
+  const X = i => L + i * (VW - L - R) / (B.length - 1), Y = v => base - (v / top) * (base - T);
+  const ptsF = fin.map((v, i) => [X(i), Y(v)]), ptsA = add.map((v, i) => [X(i), Y(v)]);
+  const line = p => smoothPath(p, T, base);
+  const area = p => `${line(p)} L${p[p.length - 1][0].toFixed(1)} ${base} L${p[0][0].toFixed(1)} ${base} Z`;
+  const step = B.length > 8 ? 2 : 1;
+  const grid = [0, 1, 2, 3].map(k => { const v = top * k / 3, y = Y(v);
+    return `<line class="gl" x1="${L}" x2="${VW - R}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"/><text x="${L - 8}" y="${(y + 3.5).toFixed(1)}" text-anchor="end">${Math.round(v)}</text>`; }).join('');
+  const labels = B.map((b, i) => (B.length - 1 - i) % step === 0 ? `<text x="${X(i).toFixed(1)}" y="${VH - 8}" text-anchor="middle">${esc(b.l)}</text>` : '').join('');
+  const dots = (pts, vals, cls, name) => pts.map((p, i) => `<g class="hit"><circle class="hz" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="10"/><circle class="pt ${cls}" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.6"/><title>${esc(B[i].l)} · ${vals[i]} ${name}</title></g>`).join('');
+
+  return `<section class="panel tf-panel tf-chart">
+    <div class="panel-h">${icon('clock')}<h3>Task progress</h3><span class="spacer"></span>
+      <div class="seg seg-sm" role="group" aria-label="Chart range">
+        ${[['day', 'Daily'], ['week', 'Weekly'], ['month', 'Monthly']].map(([r, l]) => `<button data-act="task-range" data-r="${r}" aria-pressed="${TASKRANGE === r}">${l}</button>`).join('')}
+      </div>
+    </div>
+    <div class="ch-legend"><span><i class="f"></i>Finished <b data-count="${sumF}">${sumF}</b></span><span><i class="a"></i>Added <b data-count="${sumA}">${sumA}</b></span></div>
+    <div class="ch-box">
+      <svg class="ch" viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Tasks finished and added over time">
+        <defs>
+          <linearGradient id="tfgF" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E9B94A" stop-opacity=".34"/><stop offset="1" stop-color="#E9B94A" stop-opacity="0"/></linearGradient>
+          <linearGradient id="tfgA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8FA6CE" stop-opacity=".26"/><stop offset="1" stop-color="#8FA6CE" stop-opacity="0"/></linearGradient>
+        </defs>
+        ${grid}${labels}
+        <path class="ar" d="${area(ptsA)}" fill="url(#tfgA)"/><path class="ln a" pathLength="1" d="${line(ptsA)}"/>
+        <path class="ar" d="${area(ptsF)}" fill="url(#tfgF)"/><path class="ln f" pathLength="1" d="${line(ptsF)}"/>
+        ${dots(ptsA, add, 'a', 'added')}${dots(ptsF, fin, 'f', 'finished')}
+      </svg>
+      ${sumF + sumA === 0 ? '<p class="ch-empty">Add and finish a task and the lines start to move.</p>' : ''}
+    </div>
+  </section>`;
+}
+
+function donutPanel(all) {
+  const n = { todo: 0, doing: 0, done: 0 };
+  all.forEach(t => { n[taskState(t)]++; });
+  const total = all.length, R = 46, C = 2 * Math.PI * R, gap = total > 1 ? 3 : 0;
+  const parts = [['todo', 'To do', 'var(--p1)'], ['doing', 'In progress', 'var(--iris)'], ['done', 'Done', 'var(--mint)']];
+  let off = 0;
+  const segs = parts.map(([k, label, col]) => {
+    if (!n[k]) return '';
+    const len = Math.max(0.5, C * n[k] / total - gap);
+    const s = `<circle class="seg" cx="60" cy="60" r="${R}" fill="none" stroke="${col}" stroke-width="11" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 60 60)"><title>${label}: ${n[k]}</title></circle>`;
+    off += C * n[k] / total;
+    return s;
+  }).join('');
+  return `<section class="panel tf-panel tf-donut">
+    <div class="panel-h">${icon('layers')}<h3>Status overview</h3></div>
+    <div class="donut-wrap">
+      <svg class="donut" viewBox="0 0 120 120" role="img" aria-label="${n.todo} to do, ${n.doing} in progress, ${n.done} done">
+        <circle cx="60" cy="60" r="${R}" fill="none" stroke="var(--rule)" stroke-width="11"/>${segs}
+      </svg>
+      <div class="donut-c"><b data-count="${total}">${total}</b><span>${total === 1 ? 'task' : 'tasks'}</span></div>
+    </div>
+    <ul class="tf-legend">${parts.map(([k, l, c]) => `<li><i style="background:${c}"></i>${l}<b data-count="${n[k]}">${n[k]}</b></li>`).join('')}</ul>
+  </section>`;
+}
+
+function upcomingPanel(open) {
+  const t0 = todayISO(), t7 = iso(addDays(parseISO(t0), 7));
+  const list = open.filter(t => t.date >= t0 && t.date <= t7)
+    .sort((a, b) => a.date.localeCompare(b.date) || (a.time || '99').localeCompare(b.time || '99')).slice(0, 5);
+  return `<section class="panel tf-panel tf-up">
+    <div class="panel-h">${icon('flag')}<h3>Upcoming</h3><span class="spacer"></span><span class="hint">next 7 days</span></div>
+    ${list.length ? `<div class="up-list">${list.map(t => { const d = parseISO(t.date); return `
+      <button class="up-row" style="--pcol:${prio(t.priority).css}" data-act="edit-task" data-id="${t.id}">
+        <span class="up-d"><b>${d.getDate()}</b><i>${esc(fmtDate(d, { month: 'short' }))}</i></span>
+        <span class="up-bd"><b>${esc(t.title)}</b><span>${esc([code(t.subjectId), t.time || 'any time'].filter(Boolean).join(' · '))}</span></span>
+        <span class="up-dot" title="${prio(t.priority).label} priority"></span>
+      </button>`; }).join('')}</div>`
+    : '<p class="empty"><b>Nothing due this week</b>Tasks dated in the next seven days show up here.</p>'}
+  </section>`;
+}
+
+/** Numbers climb to their value when a view is replayed. */
+function countUps(root) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  $$('[data-count]', root).forEach(el => {
+    const to = Number(el.dataset.count) || 0;
+    if (!to) return;
+    const t0 = performance.now();
+    const step = now => { const k = Math.min(1, (now - t0) / 750); el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+    el.textContent = '0'; requestAnimationFrame(step);
+  });
+}
+
+/** A soft light follows the pointer across cards and panels. */
+document.addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch') return;
+  const el = e.target.closest?.('.task, .tf-panel, .focus');
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  el.style.setProperty('--mx', `${e.clientX - r.left}px`);
+  el.style.setProperty('--my', `${e.clientY - r.top}px`);
+}, { passive: true });
 
 function focusHTML(t) {
   const p = prio(t.priority);
@@ -1505,25 +1646,31 @@ function listHTML(open) {
 function taskCard(t, { compact = false } = {}) {
   const p = prio(t.priority);
   const s = subj(t.subjectId);
+  const total = t.steps.length;
   const doneSteps = t.steps.filter(x => x.done).length;
+  const pctDone = t.done ? 100 : total ? Math.round(doneSteps / total * 100) : 0;
   const expanded = EXPANDED.has(t.id);
-  const showSteps = t.steps.length || expanded;
+  const showSteps = total || expanded;
+  const st = taskStatus(t);
 
-  return `<article class="task ${t.done ? 'done' : ''}" data-id="${t.id}" draggable="${!compact}" style="--pcol:${p.css}">
-    <button class="task-check" data-act="toggle" data-id="${t.id}" aria-pressed="${t.done}" aria-label="${t.done ? 'Mark not done' : 'Mark done'}: ${esc(t.title)}">${icon('check')}</button>
+  return `<article class="task ${t.done ? 'done' : ''} ${compact ? 'is-compact' : ''}" data-id="${t.id}" draggable="${!compact}" style="--pcol:${p.css};--subject:${hue(t.subjectId)}">
+    <div class="task-top">
+      <button class="task-check" data-act="toggle" data-id="${t.id}" aria-pressed="${t.done}" aria-label="${t.done ? 'Mark not done' : 'Mark done'}: ${esc(t.title)}"><span class="lt">${esc((s?.code || '•').charAt(0).toUpperCase())}</span>${icon('check')}</button>
+      <span class="task-sub">${esc(code(t.subjectId) || 'No subject')}</span>
+      <span class="tf-pill st-${st.k}">${st.l}</span>
+    </div>
     <div class="task-bd">
       <input class="task-title" data-act="rename" data-id="${t.id}" value="${esc(t.title)}" aria-label="Task name">
       <div class="task-meta">
         <span class="due u-${urgency(t.date)}">${esc(whenLabel(t))}</span>
-        ${s ? `<span class="code" style="color:${hue(s.id)}">${esc(s.code)}</span>` : ''}
-        ${t.steps.length ? `<span>${doneSteps}/${t.steps.length} done</span>` : ''}
+        ${total ? `<span>${doneSteps}/${total} steps</span>` : ''}
         ${t.remind !== null && t.remind >= 0 ? `<span>${icon('bell')}</span>` : ''}
       </div>
-      ${t.steps.length ? `<div class="prog"><i style="width:${Math.round(doneSteps / t.steps.length * 100)}%"></i></div>` : ''}
+      <div class="prog-row"><div class="prog"><i style="width:${pctDone}%"></i></div><b>${total || t.done ? pctDone + '%' : '–'}</b></div>
       ${showSteps ? `<div class="steps">
-        ${t.steps.map(st => `<button class="step ${st.done ? 'on' : ''}" data-act="toggle-step" data-id="${t.id}" data-sid="${st.id}">
-          <span class="bx">${icon('check')}</span><span>${esc(st.text)}</span>
-          <span class="rm" data-act="del-step" data-id="${t.id}" data-sid="${st.id}" role="button" aria-label="Remove step">${icon('close')}</span>
+        ${t.steps.map(st2 => `<button class="step ${st2.done ? 'on' : ''}" data-act="toggle-step" data-id="${t.id}" data-sid="${st2.id}">
+          <span class="bx">${icon('check')}</span><span>${esc(st2.text)}</span>
+          <span class="rm" data-act="del-step" data-id="${t.id}" data-sid="${st2.id}" role="button" aria-label="Remove step">${icon('close')}</span>
         </button>`).join('')}
         <form class="step-add" data-form="add-step" data-id="${t.id}">
           <input type="text" name="text" placeholder="Add a step…" required autocomplete="off">
@@ -1531,11 +1678,14 @@ function taskCard(t, { compact = false } = {}) {
         </form>
       </div>` : ''}
     </div>
-    <div class="task-actions">
-      <button class="icon-btn" data-act="bump-prio" data-id="${t.id}" aria-label="Change priority" title="Priority: ${p.label}">${icon('flag')}</button>
-      <button class="icon-btn" data-act="toggle-steps" data-id="${t.id}" aria-label="Checklist" title="Checklist">${icon('list')}</button>
-      <button class="icon-btn" data-act="edit-task" data-id="${t.id}" aria-label="Edit task" title="Edit">${icon('pencil')}</button>
-      <button class="icon-btn danger" data-act="del-task" data-id="${t.id}" aria-label="Delete task" title="Delete">${icon('trash')}</button>
+    <div class="task-foot">
+      <span class="task-flag">${icon('flag')}${p.label}</span>
+      <div class="task-actions">
+        <button class="icon-btn" data-act="bump-prio" data-id="${t.id}" aria-label="Change priority" title="Priority: ${p.label}">${icon('flag')}</button>
+        <button class="icon-btn" data-act="toggle-steps" data-id="${t.id}" aria-label="Checklist" title="Checklist">${icon('list')}</button>
+        <button class="icon-btn" data-act="edit-task" data-id="${t.id}" aria-label="Edit task" title="Edit">${icon('pencil')}</button>
+        <button class="icon-btn danger" data-act="del-task" data-id="${t.id}" aria-label="Delete task" title="Delete">${icon('trash')}</button>
+      </div>
     </div>
   </article>`;
 }
@@ -2098,6 +2248,7 @@ function renderChrome() {
 }
 
 let lastView = null;
+let lastFx = null;
 function render() {
   const was = MOBILE;
   MOBILE = mq.matches;
@@ -2115,6 +2266,11 @@ function render() {
     void main.offsetWidth;
     main.classList.add('enter');
   } else main.scrollTop = keep;
+
+  const fxKey = S.view === 'timetable' ? `tt:${S.ttMode}:${S.ttDate}` : S.view === 'tasks' ? `tk:${S.taskView}:${S.taskScope}:${!!S.taskShowDone}:${TASKRANGE}` : null;
+  main.classList.remove('fx');
+  if (fxKey && fxKey !== lastFx) { void main.offsetWidth; main.classList.add('fx'); countUps(main); }
+  lastFx = fxKey;
 
   if (S.view === 'notes') wireEditor();
   if (S.view === 'files') { wireFiles(); wireThumbs(); xpSelectionUI(); }
@@ -2349,7 +2505,7 @@ function uiTick() {
   }
   const tl = $('#ttNow');
   if (tl) {
-    if (m >= TT.lo && m <= TT.hi) { tl.style.top = `${((m - TT.lo) / (TT.hi - TT.lo)) * 100}%`; tl.style.display = ''; }
+    if (m >= TT.lo && m <= TT.hi) { tl.style.left = `${((m - TT.lo) / (TT.hi - TT.lo)) * 100}%`; tl.style.display = ''; }
     else tl.style.display = 'none';
   }
 }
@@ -2797,6 +2953,7 @@ const actions = {
     if (t) t.steps = t.steps.filter(x => x.id !== el.dataset.sid);
   }),
   'task-view': (_, el) => commit(s => { s.taskView = el.dataset.v; }),
+  'task-range': (_, el) => { TASKRANGE = el.dataset.r; render(); },
   'task-scope': () => commit(s => { s.taskScope = s.taskScope === 'subject' ? 'all' : 'subject'; }),
   'show-done': () => commit(s => { s.taskShowDone = !s.taskShowDone; }),
   /* picking a priority must not wipe what is half-typed in the form */
@@ -2826,9 +2983,9 @@ const actions = {
     const date = el.dataset.date || S.ttDate || todayISO();
     const wd = el.dataset.wd !== undefined ? Number(el.dataset.wd) : wdOf(parseISO(date));
     let start = '09:00';
-    if (el.classList?.contains('tt-col') && e) {
+    if (el.classList?.contains('tth-track') && e) {
       const r = el.getBoundingClientRect();
-      const mins = TT.lo + ((e.clientY - r.top) / r.height) * (TT.hi - TT.lo);
+      const mins = TT.lo + ((e.clientX - r.left) / r.width) * (TT.hi - TT.lo);
       start = fromMin(clamp(Math.round(mins / 15) * 15, TT.lo, TT.hi - 30));
     }
     openSheet(entrySheet({ kind: 'class', weekday: wd, date, start, end: fromMin(toMin(start) + 60), subjectId: S.activeSubject, remind: null }), mountEntrySheet);

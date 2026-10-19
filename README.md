@@ -64,12 +64,13 @@ Repeating classes and one-off events on the same grid, in three views:
 | **Day** | One column, more room per block |
 | **Agenda** | A list — and where reminders are configured |
 
-There is one layout, and it is compact on purpose: the grid only spans the
-hours your week actually uses (earliest start to latest finish) and sizes each
-hour so the whole week fits on screen. Entries that clash sit side by side
-instead of on top of each other, very short entries still get enough height to
-show their name, and tasks due outside the hours shown are pinned to the top or
-bottom edge of their day.
+The week grid has **hours across the top and one row per day down the side**.
+It is compact on purpose: it only spans the hours your week actually uses
+(earliest start to latest finish) and sizes the rows so the whole week fits on
+screen. On narrow windows it scrolls sideways while the day names stay put. Entries that clash sit side by side
+instead of on top of each other, very short entries still get enough room to
+show their name, and tasks due outside the hours shown are pinned to the left or
+right edge of their day.
 
 Reminders live here rather than in a section of their own, which makes the
 difference between *a thing at a time* and *a thing to finish* legible at a
@@ -77,6 +78,13 @@ glance. Set a lead time per entry in the Agenda view, or a default for
 everything in Settings. Anything with a reminder shows a bell on the grid.
 
 ### Tasks
+An overview strip sits under the Focus card: a **Task progress** chart (tasks
+added vs. finished, daily / weekly / monthly), a **Status overview** donut (to do,
+in progress, done) and the **Upcoming** tasks for the next seven days. Every task
+is a card with its subject badge, a status pill (Overdue, Due today, Due soon,
+Planned, Done), a progress bar and its priority. Views replay a short entrance
+animation when you change week or switch task view.
+
 A **Focus** card puts the single hottest item up front — ranked by priority
 weighted against how late it is, not by due date alone.
 
